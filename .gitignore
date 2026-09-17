@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+out/
+.aws-sam/
+evals/results/
+web/node_modules/
+web/.next/
+.env
+.DS_Store
