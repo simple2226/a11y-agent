@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<!-- Deliberately inaccessible page, written by us, for pipeline testing.
+     Mirrors the failure patterns actually found on Indian college portals:
+     spacer-gif layout, icon images with no alt, vague link text, unlabelled
+     search inputs, low-contrast marquee notices, tables used for layout. -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Demo Institute of Technology</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 0; }
+  .topbar { background: #1c3f94; color: #8aa3d8; padding: 6px 12px; font-size: 12px; }
+  .notice { color: #999999; background: #ffffff; padding: 8px; }
+  .btn { background: #6c8ebf; color: #ffffff; padding: 6px 14px; display: inline-block; }
+  .nav a { color: #7788aa; margin-right: 14px; }
+  .icon { width: 16px; height: 16px; }
+  .spacer { width: 1px; height: 1px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">Last updated: 12/03/2026 &nbsp; A- A A+</div>
+
+<table width="100%" cellpadding="0" cellspacing="0">
+  <tr>
+    <td width="120"><img src="/images/logo.png" width="100"></td>
+    <td>
+      <h3>Demo Institute of Technology</h3>
+      <div class="nav">
+        <a href="/about">About</a>
+        <a href="/admissions">Admissions</a>
+        <a href="/depts">Departments</a>
+        <a href="/contact">Contact</a>
+      </div>
+    </td>
+    <td align="right">
+      <input type="text" name="q" placeholder="Search">
+      <span class="btn" onclick="doSearch()">Go</span>
+    </td>
+  </tr>
+</table>
+
+<img src="/images/spacer.gif" class="spacer">
+
+<div class="notice">
+  <img src="/images/new-icon.gif" class="icon">
+  Admission counselling schedule for 2026-27 has been revised.
+  <a href="/notices/459.pdf">click here</a>
+</div>
+
+<div class="notice">
+  <img src="/images/new-icon.gif" class="icon">
+  Tender notice for laboratory equipment procurement.
+  <a href="/notices/460.pdf">click here</a>
+</div>
+
+<h4>Quick Links</h4>
+<table>
+  <tr>
+    <td><img src="/images/bullet.gif" class="icon"> <a href="/exam">Examination Cell</a></td>
+    <td><img src="/images/bullet.gif" class="icon"> <a href="/library">Central Library</a></td>
+  </tr>
+  <tr>
+    <td><img src="/images/bullet.gif" class="icon"> <a href="/hostel">Hostel</a></td>
+    <td><img src="/images/bullet.gif" class="icon"> <a href="/grievance">Grievance Portal</a></td>
+  </tr>
+</table>
+
+<h4>Photo Gallery</h4>
+<img src="/gallery/convocation-2025-01.jpg" width="200">
+<img src="/gallery/convocation-2025-02.jpg" width="200">
+<img src="/gallery/sports-meet.jpg" width="200">
+
+<h4>Feedback</h4>
+<div>
+  <input type="text" name="name">
+  <input type="email" name="email">
+  <textarea name="message" rows="3"></textarea>
+  <span class="btn" onclick="submitForm()">Submit</span>
+</div>
+
+<div class="topbar">
+  Content owned and maintained by Demo Institute of Technology.
+  <a href="/sitemap">more</a>
+</div>
+
+</body>
+</html>
