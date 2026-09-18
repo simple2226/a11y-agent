@@ -122,12 +122,14 @@ def _rewrite_inline_styles(soup: BeautifulSoup, base_url: str) -> int:
     return rewritten_count
 
 
-def _absolutise_form_actions(soup: BeautifulSoup, base_url: str) -> None:
+def _neutralise_form_actions(soup: BeautifulSoup) -> None:
     """Forms are never submitted in our sandbox, but a relative action combined
-    with <base> can send a stray request at the origin. Point them nowhere."""
+    with <base> can send a stray request at the origin. Point them nowhere and
+    keep the original action on a data attribute for the diff view."""
     for form_element in soup.find_all("form"):
+        original_action = form_element.get("action", "")
+        form_element["data-a11y-agent-original-action"] = original_action
         form_element["action"] = "javascript:void(0)"
-        form_element["data-a11y-agent-original-action"] = form_element.get("action", "")
 
 
 def mirror(url: str, neutralise_forms: bool = True) -> MirroredPage:
@@ -150,7 +152,7 @@ def mirror(url: str, neutralise_forms: bool = True) -> MirroredPage:
         notes.append(f"rewrote url() in {rewritten_styles} style block(s)/attribute(s)")
 
     if neutralise_forms:
-        _absolutise_form_actions(soup)
+        _neutralise_form_actions(soup)
 
     if final_url != url:
         notes.append(f"redirected to {final_url}")

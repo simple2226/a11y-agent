@@ -49,21 +49,20 @@ def audit_only(html_text: str) -> None:
 
 
 def run_agent(html_text: str, page_url: str, output_directory: Path) -> dict:
-    from agent.graph import build_graph
+    from agent.graph import build_graph, initial_state
 
     graph = build_graph()
     run_id = uuid.uuid4().hex[:12]
 
-    initial_state = {
-        "run_id": run_id,
-        "page_url": page_url,
-        "page_title": extract_title(html_text),
-        "original_html": html_text,
-        "log": [],
-    }
+    starting_state = initial_state(
+        run_id=run_id,
+        page_url=page_url,
+        page_title=extract_title(html_text),
+        original_html=html_text,
+    )
 
     started_at = time.time()
-    final_state = graph.invoke(initial_state, config={"recursion_limit": 100})
+    final_state = graph.invoke(starting_state, config={"recursion_limit": 100})
     elapsed_seconds = time.time() - started_at
 
     delta = compare(final_state["original_violations"], final_state["final_violations"])

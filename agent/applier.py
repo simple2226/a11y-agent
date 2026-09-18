@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
+from typing import cast
 
 from lxml import html as lxml_html
-from lxml.cssselect import CSSSelector, SelectorError
+from lxml.cssselect import CSSSelector
 
 from agent.schema import MAX_MATCHES_PER_EDIT, InvalidEdit, validate_edit
 
@@ -56,8 +57,13 @@ class ApplyResult:
         return "\n".join(lines)
 
 
+def _serialise(element, **kwargs) -> str:
+    """lxml's tostring is typed str | bytes; with encoding="unicode" it is always str."""
+    return cast(str, lxml_html.tostring(element, encoding="unicode", **kwargs))
+
+
 def _snippet(element) -> str:
-    return lxml_html.tostring(element, encoding="unicode", with_tail=False)[:SNIPPET_LENGTH]
+    return _serialise(element, with_tail=False)[:SNIPPET_LENGTH]
 
 
 def _get_or_create_patch_style_element(tree):
@@ -156,7 +162,7 @@ def apply_edits(html_text: str, edits: list[dict]) -> ApplyResult:
 
         try:
             selector = CSSSelector(edit["selector"])
-        except (SelectorError, Exception) as error:  # cssselect raises broadly
+        except Exception as error:  # cssselect raises several unrelated types
             result.rejected.append(RejectedEdit(edit, f"unparseable selector: {error}"))
             continue
 
@@ -196,5 +202,5 @@ def apply_edits(html_text: str, edits: list[dict]) -> ApplyResult:
         if not failed:
             result.applied.append(applied_record)
 
-    result.html = lxml_html.tostring(tree, encoding="unicode", doctype="<!DOCTYPE html>")
+    result.html = _serialise(tree, doctype="<!DOCTYPE html>")
     return result

@@ -39,18 +39,17 @@ def evaluate_fixture(fixture_path: Path, use_agent: bool) -> dict:
             "rules_failing": len(result.violations),
         }
 
-    from agent.graph import build_graph
+    from agent.graph import build_graph, initial_state
 
     graph = build_graph()
     started_at = time.time()
     final_state = graph.invoke(
-        {
-            "run_id": fixture_path.stem,
-            "page_url": f"file://{fixture_path}",
-            "page_title": fixture_path.stem,
-            "original_html": html_text,
-            "log": [],
-        },
+        initial_state(
+            run_id=fixture_path.stem,
+            page_url=f"file://{fixture_path}",
+            page_title=fixture_path.stem,
+            original_html=html_text,
+        ),
         config={"recursion_limit": 100},
     )
     elapsed = time.time() - started_at

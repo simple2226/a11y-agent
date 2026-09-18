@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from playwright.sync_api import Error as PlaywrightError
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import ViewportSize, sync_playwright
 
 AXE_SCRIPT_PATH = os.environ.get(
     "AXE_SCRIPT_PATH",
@@ -28,11 +28,11 @@ CHROMIUM_LAUNCH_ARGS = [
     "--no-sandbox",
     "--disable-dev-shm-usage",
     "--disable-gpu",
-    "--single-process",
+    # "--single-process",
     "--no-zygote",
 ]
 
-VIEWPORT = {"width": 1280, "height": 900}
+VIEWPORT: ViewportSize = {"width": 1280, "height": 900}
 
 NAVIGATION_TIMEOUT_MS = 30_000
 
@@ -92,7 +92,7 @@ def _trim_violation(violation: dict, max_nodes: int) -> dict:
 
 
 def _run_axe_on_page(page, take_screenshot: bool, max_nodes_per_violation: int) -> AuditResult:
-    page.add_script_tag(path=AXE_SCRIPT_PATH)
+    page.add_script_tag(path=str(Path(AXE_SCRIPT_PATH).resolve()))
     raw = page.evaluate(AXE_RUN_SCRIPT, AXE_RUN_OPTIONS)
 
     screenshot_png = None
