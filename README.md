@@ -400,6 +400,7 @@ Reads `out/report.json` from the CLI run by default, so it works with no AWS at
 all. Point `REPORT_DIR` elsewhere, or set `NEXT_PUBLIC_API_URL` to read the
 deployed API instead.
 
+
 Design notes, since Best UI is judged:
 
 - Every colour token clears 4.5:1 on the page background. An accessibility tool
