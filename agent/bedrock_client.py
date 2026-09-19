@@ -88,6 +88,9 @@ class ModelEdits:
     deferred: list[dict] = field(default_factory=list)
     usage: dict = field(default_factory=dict)
     stop_reason: str = ""
+    # Which backend actually answered. With a fallback chain this is not
+    # knowable from configuration, and the run log has to be able to say so.
+    provider: str = ""
 
 
 def _client():

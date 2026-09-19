@@ -11,6 +11,15 @@ ModelEdits, so agent/graph.py never changes.
     MODEL_PROVIDER=openai                 OPENAI_API_KEY, OPENAI_MODEL, OPENAI_BASE_URL
     MODEL_PROVIDER=mock                   no credentials, deterministic rules
 
+MODEL_PROVIDER also takes a comma-separated fallback chain, tried in order:
+
+    MODEL_PROVIDER=gemini,groq,mock
+
+That exists because a free-tier endpoint returning 503 "experiencing high
+demand" is capacity, not a bug, and no retry policy fixes it. The only remedy is
+a different endpoint. The chain shares one time budget, and the run log records
+which provider actually answered.
+
 OPENAI_BASE_URL makes the openai provider work against anything speaking the
 Chat Completions API -- Groq, OpenRouter, Together, a local Ollama.
 
@@ -49,6 +58,13 @@ MODEL_CALL_BUDGET_SECONDS = float(os.environ.get("MODEL_CALL_BUDGET_SECONDS", "2
 # 404 is deliberately absent: a retired model name never comes back, and
 # retrying it just burns the backoff budget before reporting the real problem.
 RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+
+# Credentials, billing and bad model names. These fail identically on every call
+# for the rest of the process, so a provider that returns one is taken out of
+# the chain instead of being asked again per rule. 402 is here because of a real
+# run: "your prepayment credits are depleted" would otherwise have cost one
+# round trip for each of eight clusters, to be told the same thing eight times.
+FATAL_STATUS_CODES = {400, 401, 402, 403, 404}
 BASE_BACKOFF_SECONDS = 2.0
 MAX_BACKOFF_SECONDS = 30.0
 
@@ -92,25 +108,39 @@ def _explain_http_failure(response: httpx.Response) -> str:
             "clears. Wait for the reset, use a different key, or switch model.\n"
             f"  {body}"
         )
+    if "credits are depleted" in lowered or "prepayment" in lowered:
+        return (
+            "the account is out of prepaid credit -- this is a billing wall, not "
+            "a rate limit, and it will fail identically on every call until the "
+            "balance is topped up. Add credit, use a key on a project with free-"
+            "tier access, or put another provider first in MODEL_PROVIDER.\n"
+            f"  {body}"
+        )
     return body
 
 
-def _post_with_retry(provider: str, **request_kwargs) -> httpx.Response:
+def _post_with_retry(
+    provider: str,
+    budget_seconds: float | None = None,
+    **request_kwargs,
+) -> httpx.Response:
     """POST, retrying transient failures. Returns a 2xx response or raises.
 
-    Bounded twice over: MAX_ATTEMPTS caps how many times we ask, and
-    MODEL_CALL_BUDGET_SECONDS caps how long the whole thing may take. The
-    deadline is the one that matters operationally -- it is what turns "the
-    demo hung" into "the demo said what went wrong".
+    Bounded twice over: MAX_ATTEMPTS caps how many times we ask, and the budget
+    caps how long the whole thing may take. The deadline is the one that matters
+    operationally -- it is what turns "the demo hung" into "the demo said what
+    went wrong", and with a fallback chain it is what leaves time for the next
+    provider to be tried.
     """
+    budget = MODEL_CALL_BUDGET_SECONDS if budget_seconds is None else budget_seconds
     last_detail = "no attempt made"
-    deadline = time.monotonic() + MODEL_CALL_BUDGET_SECONDS
+    deadline = time.monotonic() + budget
 
     for attempt in range(MAX_ATTEMPTS):
         remaining = deadline - time.monotonic()
         if remaining <= 1.0:
             raise ProviderError(
-                f"{provider} gave up after {MODEL_CALL_BUDGET_SECONDS:.0f}s "
+                f"{provider} gave up after {budget:.0f}s "
                 f"({attempt} attempt(s)) -- {last_detail}"
             )
 
@@ -131,7 +161,12 @@ def _post_with_retry(provider: str, **request_kwargs) -> httpx.Response:
             last_detail = f"HTTP {response.status_code}: {detail}"
 
             if response.status_code not in RETRYABLE_STATUS_CODES:
-                raise ProviderError(
+                error_type = (
+                    ProviderConfigError
+                    if response.status_code in FATAL_STATUS_CODES
+                    else ProviderError
+                )
+                raise error_type(
                     f"{provider} {response.status_code}: "
                     f"{_explain_http_failure(response)}"
                 )
@@ -165,28 +200,64 @@ KNOWN_PROVIDERS = {"bedrock", "anthropic", "gemini", "openai", "groq", "openrout
                    "ollama", "mock"}
 
 
-def resolve_provider() -> str:
-    """Read the provider on every call.
+def resolve_provider_chain() -> list[str]:
+    """The providers to try, in order, on every call.
+
+    MODEL_PROVIDER accepts a comma-separated list: "gemini,groq,mock" means try
+    Gemini, fall back to Groq, and fall back again to the deterministic rules.
+    A free-tier endpoint answering 503 "experiencing high demand" is not a bug
+    we can retry our way out of -- it is capacity, and the only real remedy is a
+    different endpoint.
 
     Deliberately NOT a module-level constant: a --provider flag sets os.environ
     after this module is imported, and a constant would silently ignore it.
     """
     if os.environ.get("A11Y_MOCK_MODEL", "").strip() in {"1", "true", "yes"}:
-        return "mock"
-    return os.environ.get("MODEL_PROVIDER", "bedrock").strip().lower()
+        return ["mock"]
+
+    raw = os.environ.get("MODEL_PROVIDER", "bedrock")
+    chain = [name.strip().lower() for name in raw.split(",") if name.strip()]
+
+    unknown = [name for name in chain if name not in KNOWN_PROVIDERS]
+    if unknown:
+        raise ProviderError(
+            f"unknown provider(s) {', '.join(unknown)}. "
+            f"Known: {', '.join(sorted(KNOWN_PROVIDERS))}"
+        )
+    return chain or ["bedrock"]
+
+
+def resolve_provider() -> str:
+    """The first provider in the chain. Kept for callers that want one name."""
+    return resolve_provider_chain()[0]
+
+
+def model_for(provider: str) -> str:
+    named = {
+        "bedrock": os.environ.get("BEDROCK_MODEL_ID", "us.amazon.nova-pro-v1:0"),
+        "anthropic": os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929"),
+        "gemini": os.environ.get("GEMINI_MODEL", GEMINI_DEFAULT_MODEL),
+        "mock": "deterministic rules, no network",
+    }
+    if provider in named:
+        return named[provider]
+
+    defaults = OPENAI_COMPATIBLE_DEFAULTS.get(
+        provider, OPENAI_COMPATIBLE_DEFAULTS["openai"]
+    )
+    return (
+        os.environ.get(defaults["model_env"], "").strip()
+        or os.environ.get("OPENAI_MODEL", "").strip()
+        or defaults["model"]
+    )
 
 
 def active_model_label() -> str:
     """One line describing exactly what will be called. Printed at startup so
     'why did it hit Bedrock' is never a question again."""
-    provider = resolve_provider()
-    model = {
-        "bedrock": os.environ.get("BEDROCK_MODEL_ID", "us.amazon.nova-pro-v1:0"),
-        "anthropic": os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929"),
-        "gemini": os.environ.get("GEMINI_MODEL", GEMINI_DEFAULT_MODEL),
-        "mock": "deterministic rules, no network",
-    }.get(provider, os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
-    return f"{provider} / {model}"
+    return " -> ".join(
+        f"{provider} / {model_for(provider)}" for provider in resolve_provider_chain()
+    )
 
 # The tool's JSON schema, shared by every provider that speaks plain JSON Schema.
 TOOL_INPUT_SCHEMA = TOOL_SPEC["toolSpec"]["inputSchema"]["json"]
@@ -197,10 +268,21 @@ class ProviderError(RuntimeError):
     pass
 
 
+class ProviderConfigError(ProviderError):
+    """A failure that will not clear on its own within this run.
+
+    A depleted prepay balance, a rejected key, a retired model name: retrying is
+    pointless and so is asking this provider again on the next cluster. The
+    chain marks it dead for the rest of the process rather than paying a round
+    trip per rule to be told the same thing eight more times.
+    """
+
+
 def _require_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
-        raise ProviderError(
+        # Config, not weather: it will be just as unset on the next cluster.
+        raise ProviderConfigError(
             f"{name} is not set but MODEL_PROVIDER={resolve_provider()}.\n"
             f"Either set it, or run with --provider mock."
         )
@@ -220,12 +302,13 @@ def _as_model_edits(payload: dict, usage: dict) -> ModelEdits:
 # Anthropic Messages API
 # --------------------------------------------------------------------------
 
-def _request_anthropic(system_prompt: str, user_prompt: str) -> ModelEdits:
+def _request_anthropic(system_prompt: str, user_prompt: str, budget: float) -> ModelEdits:
     api_key = _require_env("ANTHROPIC_API_KEY")
     model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
 
     response = _post_with_retry(
         "anthropic",
+        budget_seconds=budget,
         url="https://api.anthropic.com/v1/messages",
         timeout=REQUEST_TIMEOUT_SECONDS,
         headers={
@@ -374,12 +457,13 @@ def _describe_gemini_failure(body: dict) -> str:
     return f"no functionCall and no text (finishReason={finish_reason})"
 
 
-def _request_gemini(system_prompt: str, user_prompt: str) -> ModelEdits:
+def _request_gemini(system_prompt: str, user_prompt: str, budget: float) -> ModelEdits:
     api_key = _require_env("GEMINI_API_KEY")
     model = os.environ.get("GEMINI_MODEL", GEMINI_DEFAULT_MODEL)
 
     response = _post_with_retry(
         "gemini",
+        budget_seconds=budget,
         url=f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         timeout=REQUEST_TIMEOUT_SECONDS,
         params={"key": api_key},
@@ -436,13 +520,82 @@ def _request_gemini(system_prompt: str, user_prompt: str) -> ModelEdits:
 # OpenAI-compatible Chat Completions (Groq, OpenRouter, Together, Ollama)
 # --------------------------------------------------------------------------
 
-def _request_openai_compatible(system_prompt: str, user_prompt: str) -> ModelEdits:
-    api_key = _require_env("OPENAI_API_KEY")
-    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-    base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+# Everything here speaks the same Chat Completions API; only the address, the
+# key variable and the default model differ. Spelling them out means
+# MODEL_PROVIDER=gemini,groq works with GROQ_API_KEY alone, instead of needing
+# three OPENAI_* variables set to Groq's values.
+OPENAI_COMPATIBLE_DEFAULTS = {
+    "openai": {
+        "base_url": "https://api.openai.com/v1",
+        "key_env": "OPENAI_API_KEY",
+        "model_env": "OPENAI_MODEL",
+        "model": "gpt-4o-mini",
+    },
+    "groq": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "key_env": "GROQ_API_KEY",
+        "model_env": "GROQ_MODEL",
+        "model": "llama-3.3-70b-versatile",
+    },
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "key_env": "OPENROUTER_API_KEY",
+        "model_env": "OPENROUTER_MODEL",
+        "model": "meta-llama/llama-3.3-70b-instruct",
+    },
+    "ollama": {
+        "base_url": "http://localhost:11434/v1",
+        "key_env": "OLLAMA_API_KEY",
+        "model_env": "OLLAMA_MODEL",
+        "model": "llama3.1",
+    },
+}
+
+
+def _openai_compatible_settings(provider: str) -> tuple[str, str, str]:
+    """(api_key, model, base_url) for one OpenAI-compatible provider.
+
+    OPENAI_BASE_URL and OPENAI_MODEL still override, so an unusual endpoint does
+    not need a new entry in the table above.
+    """
+    defaults = OPENAI_COMPATIBLE_DEFAULTS.get(
+        provider, OPENAI_COMPATIBLE_DEFAULTS["openai"]
+    )
+
+    api_key = os.environ.get(defaults["key_env"], "").strip()
+    if not api_key and provider != "ollama":
+        # Fall back to the generic name, then complain about the specific one.
+        api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key and provider != "ollama":
+        raise ProviderConfigError(
+            f"{defaults['key_env']} is not set but {provider} is in the provider "
+            f"chain. Either set it, drop {provider} from MODEL_PROVIDER, or run "
+            f"with --provider mock."
+        )
+
+    model = (
+        os.environ.get(defaults["model_env"], "").strip()
+        or os.environ.get("OPENAI_MODEL", "").strip()
+        or defaults["model"]
+    )
+    base_url = (
+        os.environ.get("OPENAI_BASE_URL", "").strip() or defaults["base_url"]
+    ).rstrip("/")
+
+    return api_key, model, base_url
+
+
+def _request_openai_compatible(
+    system_prompt: str,
+    user_prompt: str,
+    budget: float,
+    provider: str = "openai",
+) -> ModelEdits:
+    api_key, model, base_url = _openai_compatible_settings(provider)
 
     response = _post_with_retry(
-        "openai-compatible",
+        provider,
+        budget_seconds=budget,
         url=f"{base_url}/chat/completions",
         timeout=REQUEST_TIMEOUT_SECONDS,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -478,21 +631,28 @@ def _request_openai_compatible(system_prompt: str, user_prompt: str) -> ModelEdi
                     "outputTokens": usage.get("completion_tokens", 0),
                 },
             )
-    raise ProviderError("openai-compatible returned no tool_calls")
+    raise ProviderError(f"{provider} returned no tool_calls")
 
 
 # --------------------------------------------------------------------------
 # Dispatch
 # --------------------------------------------------------------------------
 
-def request_edits(
+# Providers knocked out for the rest of this process, and why. Lambda reuses a
+# warm container across invocations, so this also spares the next run the same
+# dead round trips -- and a redeploy or a cold start clears it, which is the
+# right granularity for "someone has topped the account up".
+_disabled_providers: dict[str, str] = {}
+
+
+def _request_one(
+    provider: str,
     system_prompt: str,
     user_prompt: str,
-    rule_id: str = "",
-    nodes: list[dict] | None = None,
+    rule_id: str,
+    nodes: list[dict] | None,
+    budget: float,
 ) -> ModelEdits:
-    provider = resolve_provider()
-
     if provider == "mock":
         from agent.mock_model import generate_mock_edits
 
@@ -504,14 +664,78 @@ def request_edits(
         return bedrock_request_edits(system_prompt, user_prompt, rule_id, nodes)
 
     if provider == "anthropic":
-        return _request_anthropic(system_prompt, user_prompt)
+        return _request_anthropic(system_prompt, user_prompt, budget)
 
     if provider == "gemini":
-        return _request_gemini(system_prompt, user_prompt)
+        return _request_gemini(system_prompt, user_prompt, budget)
 
     if provider in {"openai", "groq", "openrouter", "ollama"}:
-        return _request_openai_compatible(system_prompt, user_prompt)
+        return _request_openai_compatible(system_prompt, user_prompt, budget, provider)
 
     raise ProviderError(
         f"unknown provider {provider!r}. Known: {', '.join(sorted(KNOWN_PROVIDERS))}"
+    )
+
+
+def request_edits(
+    system_prompt: str,
+    user_prompt: str,
+    rule_id: str = "",
+    nodes: list[dict] | None = None,
+) -> ModelEdits:
+    """Ask the first provider that answers.
+
+    Each provider gets an equal share of the total budget, so a chain of three
+    cannot take three times as long as a chain of one. A provider that raises is
+    logged and the next one is tried; if every one fails, the last error is
+    raised with the whole chain named, because "gemini 503" alone would hide the
+    fact that two others were tried too.
+    """
+    chain = resolve_provider_chain()
+    live = [provider for provider in chain if provider not in _disabled_providers]
+
+    # Everything is dead. Report why each one is, not just the last.
+    if not live:
+        raise ProviderError(
+            "every provider in the chain is out of action:\n  "
+            + "\n  ".join(f"{name}: {why}" for name, why in _disabled_providers.items())
+        )
+
+    per_provider_budget = MODEL_CALL_BUDGET_SECONDS / len(live)
+    failures: list[str] = []
+
+    for position, provider in enumerate(live):
+        try:
+            result = _request_one(
+                provider, system_prompt, user_prompt, rule_id, nodes, per_provider_budget
+            )
+        except ProviderConfigError as error:
+            # Billing, credentials or a bad model name. Asking again next rule
+            # would waste a round trip per cluster to be told the same thing.
+            _disabled_providers[provider] = str(error)
+            failures.append(f"{provider}: {error}")
+            print(
+                f"provider {provider} taken out of the chain for this run -- {error}",
+                flush=True,
+            )
+            continue
+        except ProviderError as error:
+            failures.append(f"{provider}: {error}")
+            print(f"provider {provider} failed, falling back -- {error}", flush=True)
+            continue
+        except Exception as error:  # noqa: BLE001 -- a provider SDK's own error type
+            failures.append(f"{provider}: {type(error).__name__}: {error}")
+            print(f"provider {provider} failed, falling back -- {error}", flush=True)
+            continue
+
+        result.provider = provider
+        if position:
+            print(f"answered by fallback provider {provider}", flush=True)
+        return result
+
+    raise ProviderError(
+        "every provider in the chain failed ("
+        + " -> ".join(live)
+        + "):\n  "
+        + "\n  ".join(failures)
     )
