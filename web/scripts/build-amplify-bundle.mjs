@@ -68,16 +68,26 @@ const manifest = {
       path: "/_next/static/*",
       target: { kind: "Static", cacheControl: "public, max-age=31536000, immutable" },
     },
-    // Anything else that exists as a static file wins; otherwise the server
-    // handles it. That covers SSR pages and both /api routes.
+    // Exactly ONE catch-all is allowed. `fallback` is what sends anything
+    // without a matching static file to the server, so a second compute-only
+    // "/*" route is both redundant and rejected:
+    //   "Multiple catch-all routes with the path '/*' detected."
+    // This one line covers SSR pages and both /api routes.
     { path: "/*", target: { kind: "Static" }, fallback: { kind: "Compute", src: "default" } },
-    { path: "/*", target: { kind: "Compute", src: "default" } },
   ],
   computeResources: [
     { name: "default", entrypoint: "server.js", runtime: "nodejs20.x" },
   ],
   framework: { name: "next", version },
 };
+
+const catchAlls = manifest.routes.filter((route) => route.path === "/*");
+if (catchAlls.length !== 1) {
+  console.error(
+    `deploy-manifest.json needs exactly one "/*" route, found ${catchAlls.length}.`,
+  );
+  process.exit(1);
+}
 
 await writeFile(
   path.join(out, "deploy-manifest.json"),
