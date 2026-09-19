@@ -19,8 +19,9 @@ export default function RuleList({ rows, selectedRuleId, onSelect }: Props) {
   return (
     <nav className="rules" aria-label="Accessibility rules found on this page">
       <p className="rules-header">
-        {rows.length} rules checked and failing before the run. Select one to see it
-        outlined in both frames.
+        <strong>{rows.length}</strong>{" "}
+        {rows.length === 1 ? "rule was" : "rules were"} failing before the run.
+        Select one to outline it in both frames.
       </p>
       <ul className="rule-list">
         {rows.map((row) => (
@@ -43,7 +44,12 @@ export default function RuleList({ rows, selectedRuleId, onSelect }: Props) {
                     </span>
                   ) : null}
                 </span>
-                <span className="visually-hidden">. {labelFor(row.outcome)}.</span>
+                {/* Visible, not screen-reader-only. "[~]" tells a sighted
+                    reader nothing, and an accessibility tool that hides its
+                    own meaning behind a glyph has no excuse. */}
+                <span className="rule-outcome" data-outcome={row.outcome}>
+                  {labelFor(row.outcome)}
+                </span>
                 <span className="rule-help">{row.help}</span>
               </span>
               <span className="rule-count">{countLabel(row)}</span>

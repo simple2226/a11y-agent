@@ -66,20 +66,56 @@ button { font: inherit; color: inherit; }
 
 /* ---------- shell ---------- */
 
+.empty {
+  max-width: 44rem;
+  margin: 0 auto;
+  padding: 5rem 1.75rem;
+  color: var(--ink-soft);
+}
+.empty h1 {
+  margin: 0 0 0.5rem;
+  font-size: var(--step-2);
+  color: var(--ink);
+}
+.empty pre {
+  margin-top: 1rem;
+  padding: 0.75rem 0.875rem;
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  overflow-x: auto;
+}
+
+/* Flex column, not a grid with named rows: the shell has two children while a
+   run is in flight and three once a report exists, and `grid-template-rows:
+   auto 1fr` silently gave the third child an implicit auto row -- so the
+   workspace never filled the viewport and the frames were always short. */
 .shell {
-  display: grid;
-  grid-template-rows: auto 1fr;
+  display: flex;
+  flex-direction: column;
   min-height: 100vh;
 }
 
 .masthead {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 1.5rem;
   flex-wrap: wrap;
-  padding: 1.25rem 1.75rem;
+  padding: 0.875rem 1.75rem;
   border-bottom: 1px solid var(--rule);
   background: var(--card);
+}
+
+/* Title and URL are one unit: the page being audited. Stacked, so a long
+   university title does not push the URL onto its own wrapped line. */
+.masthead-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+  max-width: 34rem;
 }
 
 .masthead h1 {
@@ -87,43 +123,117 @@ button { font: inherit; color: inherit; }
   font-size: var(--step-1);
   font-weight: 600;
   letter-spacing: -0.01em;
+  /* One line. The audited page's own <title> can be a paragraph. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .masthead .source {
   font-family: var(--mono);
-  font-size: 0.8125rem;
+  font-size: 0.75rem;
   color: var(--ink-soft);
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.verdict {
-  margin-left: auto;
+/* ---------- verdict bar ----------
+   The headline result. It is the first thing anyone looks at and the only
+   thing some people will look at, so the two scores get the largest type on
+   the page and everything else is subordinate to them. */
+
+.verdict-bar {
+  display: flex;
+  align-items: center;
+  gap: 2.5rem;
+  flex-wrap: wrap;
+  padding: 1.25rem 1.75rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--card);
+}
+
+.verdict-scores {
+  margin: 0;
   display: flex;
   align-items: baseline;
-  gap: 0.625rem;
+  gap: 0.75rem;
   font-family: var(--mono);
-  font-size: var(--step-2);
-  font-weight: 500;
   font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
-.verdict .before { color: var(--fail); }
-.verdict .after { color: var(--pass); }
-.verdict .arrow { color: var(--ink-soft); font-size: var(--step-1); }
-.verdict .delta {
-  font-family: var(--mono);
-  font-size: var(--step-1);
+
+.verdict-score {
+  font-size: var(--step-3);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+.verdict-score.before { color: var(--ink-soft); }
+.verdict-score.after { color: var(--pass); }
+
+.verdict-arrow {
+  font-size: var(--step-2);
+  color: var(--rule);
+  /* Optical: the glyph sits high in its box against numerals this large. */
+  transform: translateY(-0.1em);
+}
+
+.verdict-delta {
+  align-self: center;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: #e4f2ea;
   color: var(--pass);
 }
-.verdict .caption {
-  font-family: var(--sans);
-  font-size: 0.8125rem;
-  font-weight: 400;
+.verdict-delta[data-direction="down"] {
+  background: #fdeceb;
+  color: var(--fail);
+}
+
+/* A row of figures, not a definition list down the left margin. The <dl> is
+   correct markup and needs the display reset to stop behaving like one. */
+.verdict-stats {
+  margin: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 2rem;
+  flex-wrap: wrap;
+}
+
+.verdict-stat {
+  display: flex;
+  flex-direction: column-reverse; /* value above label, label reads as caption */
+  gap: 0.1rem;
+}
+.verdict-stat dt {
+  font-size: 0.75rem;
   color: var(--ink-soft);
+  white-space: nowrap;
+}
+.verdict-stat dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: var(--step-1);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.verdict-stat[data-tone="pass"] dd { color: var(--pass); }
+.verdict-stat[data-tone="fail"] dd { color: var(--fail); }
+.verdict-stat[data-tone="defer"] dd { color: var(--defer); }
+
+@media (max-width: 700px) {
+  .verdict-bar { gap: 1.25rem; padding: 1rem 1.25rem; }
+  .verdict-stats { gap: 1.25rem; }
+  .verdict-score { font-size: var(--step-2); }
 }
 
 .workspace {
+  flex: 1 1 auto;
   display: grid;
-  grid-template-columns: minmax(280px, 26rem) 1fr;
+  grid-template-columns: minmax(19rem, 24rem) minmax(0, 1fr);
   min-height: 0;
 }
 
@@ -132,20 +242,128 @@ button { font: inherit; color: inherit; }
   .verdict { margin-left: 0; width: 100%; }
 }
 
-/* ---------- rule list ---------- */
+/* ---------- landing ---------- */
 
-.rules {
+/* What a judge sees before anything has been run. A blank grey rectangle
+   reads as broken; this reads as a product waiting for input. */
+.landing {
+  max-width: 46rem;
+  padding: 4rem 1.75rem;
+  margin: 0 auto;
+}
+.landing h2 {
+  margin: 0 0 0.75rem;
+  font-size: var(--step-2);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.landing p {
+  margin: 0 0 1.25rem;
+  color: var(--ink-soft);
+  max-width: 62ch;
+  line-height: 1.6;
+}
+
+.landing-steps {
+  margin: 0 0 1.5rem;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+  display: grid;
+  gap: 0.5rem;
+}
+.landing-steps li {
+  counter-increment: step;
+  display: grid;
+  grid-template-columns: 1.5rem 1fr;
+  gap: 0.75rem;
+  align-items: baseline;
+  font-size: 0.9375rem;
+}
+.landing-steps li::before {
+  content: counter(step);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--ink-soft);
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  width: 1.5rem;
+  height: 1.5rem;
+  display: grid;
+  place-items: center;
+  background: var(--card);
+}
+
+.landing-note {
+  font-size: 0.875rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--rule);
+}
+
+/* ---------- sidebar ---------- */
+
+/* The rule list scrolls; the run facts stay pinned beneath it. On a page with
+   two violations the list alone leaves most of the column blank. */
+.sidebar {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-height: 0;
   border-right: 1px solid var(--rule);
   background: var(--card);
+}
+
+.run-facts {
+  border-top: 1px solid var(--rule);
+  padding: 0.875rem 1.25rem 1rem;
+  background: var(--paper);
+}
+
+.run-facts dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.6rem 1rem;
+}
+.run-facts dt {
+  font-size: 0.6875rem;
+  color: var(--ink-soft);
+}
+.run-facts dd {
+  margin: 0.1rem 0 0;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.run-facts-note {
+  margin: 0.875rem 0 0;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--rule);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  color: var(--ink-soft);
+}
+
+/* ---------- rule list ---------- */
+
+/* Scrolls inside the sidebar row rather than against a guessed viewport
+   offset -- the old calc(100vh - 6.5rem) was wrong the moment the verdict bar
+   appeared above it. */
+.rules {
+  background: var(--card);
   overflow-y: auto;
-  max-height: calc(100vh - 6.5rem);
+  min-height: 0;
 }
 
 .rules-header {
-  padding: 1rem 1.25rem 0.5rem;
+  margin: 0;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--rule);
   font-size: 0.8125rem;
+  line-height: 1.45;
   color: var(--ink-soft);
 }
+.rules-header strong { color: var(--ink); }
 
 .rule-list { list-style: none; margin: 0; padding: 0; }
 
@@ -204,10 +422,30 @@ button { font: inherit; color: inherit; }
 }
 .rule-impact[data-impact="critical"] { color: var(--fail); border-color: #eccaca; }
 .rule-impact[data-impact="serious"] { color: var(--defer); border-color: #e8d7b0; }
+/* The outcome in words. Colour is reinforcement here, never the only carrier:
+   the text says "Partly fixed" whether or not the colour is perceivable. */
+.rule-outcome {
+  display: inline-block;
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.05rem 0.4rem;
+  border-radius: 3px;
+  background: var(--paper);
+  color: var(--ink-soft);
+}
+.rule-outcome[data-outcome="fixed"] { background: #e4f2ea; color: var(--pass); }
+.rule-outcome[data-outcome="partial"],
+.rule-outcome[data-outcome="deferred"],
+.rule-outcome[data-outcome="reverted"] { background: #fdf6e7; color: var(--defer); }
+.rule-outcome[data-outcome="unfixed"],
+.rule-outcome[data-outcome="introduced"] { background: #fdeceb; color: var(--fail); }
+
 .rule-help {
+  display: block;
   font-size: 0.8125rem;
   color: var(--ink-soft);
-  margin-top: 0.125rem;
+  margin-top: 0.25rem;
   max-width: 60ch;
 }
 .rule-count {
@@ -221,6 +459,49 @@ button { font: inherit; color: inherit; }
 /* ---------- comparison ---------- */
 
 .compare { display: grid; grid-template-rows: 1fr auto; min-height: 0; }
+
+.compare-region {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
+}
+
+/* Segmented control. One bordered track, buttons share edges -- three separate
+   bordered boxes read as three unrelated actions rather than one choice. */
+.view-switch {
+  display: inline-flex;
+  margin: 0.75rem 0 0.75rem 1rem;
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  background: var(--paper);
+  padding: 2px;
+  gap: 2px;
+  width: fit-content;
+}
+
+.view-button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  border-radius: 3px;
+  padding: 0.3rem 0.85rem;
+  font: inherit;
+  font-size: 0.8125rem;
+  color: var(--ink-soft);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.view-button:hover { color: var(--ink); }
+.view-button[aria-pressed="true"] {
+  background: var(--card);
+  color: var(--ink);
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgb(27 36 48 / 0.12);
+}
+.view-button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
 
 .viewer { display: grid; grid-template-rows: auto 1fr; min-height: 0; }
 
@@ -259,7 +540,7 @@ button { font: inherit; color: inherit; }
   grid-template-columns: 1fr 1fr;
   gap: 1px;
   background: var(--rule);
-  min-height: 32rem;
+  min-height: 26rem;
 }
 /* Single-pane modes get the full width, which is the only way a real page
    layout is legible. */
@@ -449,16 +730,20 @@ button { font: inherit; color: inherit; }
 
 /* ---------- run starter ---------- */
 
+/* Pushed right and capped. Left to grow, the input eats every pixel the
+   masthead has and the page reads as a search box with a title stuck to it. */
 .run-starter {
   display: flex;
   align-items: center;
   gap: 0.5rem;
   flex-wrap: wrap;
-  flex: 1 1 22rem;
+  margin-left: auto;
+  flex: 0 1 34rem;
+  max-width: 34rem;
 }
 
 .url-input {
-  flex: 1 1 18rem;
+  flex: 1 1 14rem;
   min-width: 0;
   padding: 0.45rem 0.7rem;
   border: 1px solid var(--rule);

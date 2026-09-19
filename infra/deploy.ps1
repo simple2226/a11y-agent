@@ -1,18 +1,31 @@
 # One-command deploy on Windows. Docker Desktop must be running.
 #
 # Model configuration is passed as CloudFormation parameters so it survives
-# every redeploy. Set these in your shell before running:
-#   $env:MODEL_PROVIDER = "gemini,groq,mock"
-#   $env:GEMINI_API_KEY = "<your Google AI Studio key>"
+# every redeploy. Set these in the SAME shell you run this from:
+#   $env:MODEL_PROVIDER = "groq,gemini,mock"
 #   $env:GROQ_API_KEY   = "<your console.groq.com key>"
+#   $env:GEMINI_API_KEY = "<your Google AI Studio key>"
 # Keys are never written to a file and never reach the repo.
 #
 # MODEL_PROVIDER takes a comma-separated fallback chain, tried in order. Use one
-# for anything you are demoing: a free-tier 503 "high demand" has killed a run
-# before, and a second provider is the only thing that helps.
+# for anything you are demoing: a free-tier 503 "high demand" and a 402 "credits
+# depleted" have each killed a run, and a second provider is the only real cure.
+#
+# PowerShell note, learned the hard way: this script deliberately does NOT set
+# $ErrorActionPreference = "Stop". sam writes all its progress to stderr, and
+# under "Stop" the first stderr line of a redirected native command becomes a
+# terminating NativeCommandError -- the deploy dies before it starts. Failures
+# are handled explicitly below instead, which is more reliable anyway: "Stop"
+# never caught a native command's exit code to begin with.
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 Set-Location $PSScriptRoot
+
+function Fail([string]$message) {
+    Write-Host ""
+    Write-Host "ERROR: $message" -ForegroundColor Red
+    exit 1
+}
 
 $Region = if ($env:AWS_REGION) { $env:AWS_REGION } else { "us-east-1" }
 $ModelProvider = if ($env:MODEL_PROVIDER) { $env:MODEL_PROVIDER } else { "bedrock" }
@@ -21,83 +34,119 @@ $GeminiModel = if ($env:GEMINI_MODEL) { $env:GEMINI_MODEL } else { "gemini-flash
 $GroqApiKey = if ($env:GROQ_API_KEY) { $env:GROQ_API_KEY } else { "" }
 $GroqModel = if ($env:GROQ_MODEL) { $env:GROQ_MODEL } else { "llama-3.3-70b-versatile" }
 
-# CloudFormation rejects spaces in the chain, and "gemini, groq" is the natural
-# thing to type. Fix it here rather than failing 40 minutes into a build.
+# CloudFormation rejects spaces in the chain, and "groq, gemini" is the natural
+# thing to type. Fix it here rather than failing 20 minutes into a build.
 $ModelProvider = ($ModelProvider -replace "\s", "")
-$ProviderChain = $ModelProvider -split ","
+$ProviderChain = @($ModelProvider -split ",")
 
-# Guard against the mistake that costs 40 minutes: both functions pointing at
-# the same Dockerfile means the API image ships without api/ in it.
+# ---------------------------------------------------------------- preflight
+
+# Both functions must use different Dockerfiles, or the API image ships without
+# api/ in it and every request 500s on an import error.
 $dockerfiles = Select-String -Path .\template.yaml -Pattern "Dockerfile:\s*(\S+)" |
     ForEach-Object { $_.Matches[0].Groups[1].Value }
 if (($dockerfiles | Select-Object -Unique).Count -lt 2) {
-    Write-Error "template.yaml points both functions at the same Dockerfile: $dockerfiles`nLine ~91 should read 'Dockerfile: infra/Dockerfile.api'."
+    Fail "template.yaml points both functions at the same Dockerfile: $dockerfiles"
 }
 foreach ($file in $dockerfiles) {
-    if (-not (Test-Path (Join-Path ".." $file))) { Write-Error "Missing $file" }
+    if (-not (Test-Path (Join-Path ".." $file))) { Fail "Missing $file" }
 }
 Write-Host "Dockerfiles OK: $dockerfiles"
 
 if (($ProviderChain -contains "gemini") -and -not $GeminiApiKey) {
-    Write-Error "gemini is in MODEL_PROVIDER but GEMINI_API_KEY is not set in this shell."
+    Fail "gemini is in MODEL_PROVIDER but GEMINI_API_KEY is not set in this shell."
 }
 if (($ProviderChain -contains "groq") -and -not $GroqApiKey) {
-    Write-Error "groq is in MODEL_PROVIDER but GROQ_API_KEY is not set in this shell."
+    Fail "groq is in MODEL_PROVIDER but GROQ_API_KEY is not set in this shell."
 }
 Write-Host "Model provider chain: $($ProviderChain -join ' -> ')`n"
 
 # The files on disk and the files you think are on disk are different claims.
 # A chain like "groq,gemini,mock" fails CreateChangeSet against a template that
-# still declares AllowedValues -- twenty minutes of build, then a validation
-# error. Check it now instead.
-if ($ProviderChain.Count -gt 1) {
-    if (Select-String -Path .\template.yaml -Pattern "AllowedValues:\s*\[bedrock" -Quiet) {
-        Write-Error @"
-template.yaml still has 'AllowedValues: [bedrock, gemini, ...]' on ModelProvider.
-That rejects a comma-separated chain, and the deploy would fail at the changeset.
-This file is the OLD version -- replace infra/template.yaml, then re-run.
-"@
-    }
+# still declares AllowedValues -- a full build, then a validation error.
+if ($ProviderChain.Count -gt 1 -and
+    (Select-String -Path .\template.yaml -Pattern "AllowedValues:\s*\[bedrock" -Quiet)) {
+    Fail "template.yaml still constrains ModelProvider with AllowedValues, which rejects a chain. Replace infra/template.yaml with the current version."
 }
 if (-not (Select-String -Path .\template.yaml -Pattern "RUN_BUDGET_SECONDS" -Quiet)) {
-    Write-Error "template.yaml has no RUN_BUDGET_SECONDS -- it is the OLD version. Replace infra/template.yaml, then re-run."
+    Fail "template.yaml has no RUN_BUDGET_SECONDS -- it is the OLD version. Replace infra/template.yaml."
 }
 if (-not (Select-String -Path ..\agent\model_provider.py -Pattern "resolve_provider_chain" -Quiet)) {
-    Write-Error "agent/model_provider.py has no resolve_provider_chain -- it is the OLD version. Replace it, then re-run."
+    Fail "agent/model_provider.py has no resolve_provider_chain -- it is the OLD version. Replace it."
 }
 Write-Host "Source files are the current versions.`n"
 
-# $ErrorActionPreference = "Stop" does NOT stop on a native executable's exit
-# code in Windows PowerShell -- only on PowerShell's own errors. Without these
-# explicit checks, `sam deploy` can fail with "Parameter 'ModelProvider' must be
-# one of AllowedValues" and the script carries on to print an API URL, which
-# reads exactly like a successful deploy. That cost us an hour.
-function Assert-LastExitCode([string]$what) {
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host ""
-        Write-Error "$what failed with exit code $LASTEXITCODE. NOTHING WAS DEPLOYED -- the error is above."
-        exit $LASTEXITCODE
+# ------------------------------------------------------------- parameters
+
+# sam deploy rejects "GroqApiKey=" outright -- an empty value is not valid
+# --parameter-overrides syntax. So an unset key is OMITTED and CloudFormation
+# falls back to the template default (an empty string for every key here).
+#
+# Worth knowing: omitting a parameter does NOT preserve what the stack currently
+# has, it resets it to the template default. A key you do not export in this
+# shell is a key you are clearing from the deployed stack.
+$ParameterOverrides = @(
+    "ModelProvider=$ModelProvider",
+    "GeminiModel=$GeminiModel",
+    "GroqModel=$GroqModel"
+)
+$ClearedKeys = @()
+
+foreach ($secret in @(
+    @{ Name = "GeminiApiKey"; Value = $GeminiApiKey },
+    @{ Name = "GroqApiKey";   Value = $GroqApiKey }
+)) {
+    if ($secret.Value) {
+        $ParameterOverrides += "$($secret.Name)=$($secret.Value)"
+    } else {
+        $ClearedKeys += $secret.Name
     }
 }
 
+if ($ClearedKeys.Count) {
+    Write-Warning "Not set in this shell, so it will be CLEARED on the stack: $($ClearedKeys -join ', ')"
+    Write-Warning "Environment variables do not survive a new terminal."
+}
+
+# ------------------------------------------------------------------ build
+
 # Sequential on purpose: --parallel splits a slow link two ways.
 sam build
-Assert-LastExitCode "sam build"
+if ($LASTEXITCODE -ne 0) { Fail "sam build failed with exit code $LASTEXITCODE. NOTHING WAS DEPLOYED." }
+
+# ----------------------------------------------------------------- deploy
 
 # --resolve-image-repos creates the ECR repos for the container images.
 # --resolve-s3 creates the managed bucket for the CloudFormation template.
 # Both are needed; neither implies the other.
-sam deploy `
-  --stack-name a11y-agent `
-  --region $Region `
-  --resolve-image-repos `
-  --resolve-s3 `
-  --capabilities CAPABILITY_IAM `
-  --disable-rollback `
-  --no-confirm-changeset `
-  --parameter-overrides "ModelProvider=$ModelProvider" "GeminiApiKey=$GeminiApiKey" "GeminiModel=$GeminiModel" "GroqApiKey=$GroqApiKey" "GroqModel=$GroqModel"
+$DeployLogPath = Join-Path ([System.IO.Path]::GetTempPath()) "a11y-agent-sam-deploy.log"
 
-Assert-LastExitCode "sam deploy"
+$deployArgs = @(
+    "deploy",
+    "--stack-name", "a11y-agent",
+    "--region", $Region,
+    "--resolve-image-repos",
+    "--resolve-s3",
+    "--capabilities", "CAPABILITY_IAM",
+    "--disable-rollback",
+    "--no-confirm-changeset",
+    "--parameter-overrides"
+) + $ParameterOverrides
+
+& sam @deployArgs 2>&1 | Tee-Object -FilePath $DeployLogPath
+$DeployExitCode = $LASTEXITCODE
+
+# sam deploy exits 1 for "No changes to deploy", which is not a failure -- it
+# means a previous deploy already put this exact template on the stack.
+if ($DeployExitCode -ne 0) {
+    if (Select-String -Path $DeployLogPath -Pattern "No changes to deploy" -Quiet) {
+        Write-Host "`nNo changes to deploy - the stack already matches this template." -ForegroundColor Green
+    } else {
+        Fail "sam deploy failed with exit code $DeployExitCode. NOTHING WAS DEPLOYED -- the error is above."
+    }
+}
+
+# ----------------------------------------------------------------- verify
 
 Write-Host "`nAPI URL:"
 aws cloudformation describe-stacks `
@@ -107,30 +156,36 @@ aws cloudformation describe-stacks `
   --output text
 
 # Read back what is actually running. "I edited the file" and "the Lambda is
-# running that file" are different claims, and three hours were lost to
-# assuming the first implied the second.
+# running that file" are different claims, and hours were lost to assuming the
+# first implied the second.
 Write-Host "`nDeployed agent configuration:"
 $agentFn = aws lambda list-functions `
   --region $Region `
   --query "Functions[?starts_with(FunctionName, 'a11y-agent-AgentFunction')].FunctionName | [0]" `
   --output text
 
-if ($agentFn -and $agentFn -ne "None") {
-    aws lambda get-function-configuration `
-      --function-name $agentFn `
-      --region $Region `
-      --query "{lastModified: LastModified, provider: Environment.Variables.MODEL_PROVIDER, runBudget: Environment.Variables.RUN_BUDGET_SECONDS}" `
-      --output table
-
-    $budget = aws lambda get-function-configuration `
-      --function-name $agentFn --region $Region `
-      --query "Environment.Variables.RUN_BUDGET_SECONDS" --output text
-
-    if (-not $budget -or $budget -eq "None") {
-        Write-Warning "RUN_BUDGET_SECONDS is absent -- the stack did not pick up the current template. The deploy did not take."
-    } else {
-        Write-Host "Deploy verified: the running Lambda has the current configuration." -ForegroundColor Green
-    }
-} else {
-    Write-Warning "Could not find the agent Lambda to verify against."
+if (-not $agentFn -or $agentFn -eq "None") {
+    Fail "Could not find the agent Lambda to verify against."
 }
+
+aws lambda get-function-configuration `
+  --function-name $agentFn `
+  --region $Region `
+  --query "{lastModified: LastModified, provider: Environment.Variables.MODEL_PROVIDER, runBudget: Environment.Variables.RUN_BUDGET_SECONDS}" `
+  --output table
+
+$budget = aws lambda get-function-configuration `
+  --function-name $agentFn --region $Region `
+  --query "Environment.Variables.RUN_BUDGET_SECONDS" --output text
+$liveProvider = aws lambda get-function-configuration `
+  --function-name $agentFn --region $Region `
+  --query "Environment.Variables.MODEL_PROVIDER" --output text
+
+if (-not $budget -or $budget -eq "None") {
+    Fail "RUN_BUDGET_SECONDS is absent on the running Lambda -- the stack did not pick up the current template."
+}
+if ($liveProvider -ne $ModelProvider) {
+    Write-Warning "Deployed provider chain is '$liveProvider' but this shell asked for '$ModelProvider'."
+}
+
+Write-Host "Deploy verified: the running Lambda has the current configuration." -ForegroundColor Green

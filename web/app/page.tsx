@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ChangeDetail from "@/components/ChangeDetail";
 import ComparisonFrames, { type ViewMode } from "@/components/ComparisonFrames";
 import RunProgressPanel from "@/components/RunProgressPanel";
+import RunFacts from "@/components/RunFacts";
 import RunStarter from "@/components/RunStarter";
 import RuleList from "@/components/RuleList";
 import VerdictBar from "@/components/VerdictBar";
@@ -132,11 +133,20 @@ export default function Dashboard() {
   return (
     <div className="shell">
       <header className="masthead">
-        <h1>{report?.page_title || "a11y-agent"}</h1>
-        {report ? <span className="source">{report.page_url}</span> : null}
+        <div className="masthead-identity">
+          <h1 title={report?.page_title || undefined}>
+            {report?.page_title || "a11y-agent"}
+          </h1>
+          {report ? (
+            <span className="source" title={report.page_url}>
+              {report.page_url}
+            </span>
+          ) : (
+            <span className="source">accessibility remediation agent</span>
+          )}
+        </div>
 
         <RunStarter onStarted={setRunId} busy={waiting} />
-
       </header>
 
       {report && !waiting ? <VerdictBar report={report} rows={rows} /> : null}
@@ -151,7 +161,10 @@ export default function Dashboard() {
 
       {report && !waiting ? (
         <div className="workspace">
-          <RuleList rows={rows} selectedRuleId={selectedRuleId} onSelect={setSelectedRuleId} />
+          <div className="sidebar">
+            <RuleList rows={rows} selectedRuleId={selectedRuleId} onSelect={setSelectedRuleId} />
+            <RunFacts report={report} />
+          </div>
           <div className="compare">
             <ComparisonFrames
               selectors={selectedRow?.selectors ?? []}
@@ -164,6 +177,28 @@ export default function Dashboard() {
             <ChangeDetail row={selectedRow} />
           </div>
         </div>
+      ) : null}
+
+      {IS_REMOTE && !report && !waiting ? (
+        <main className="landing">
+          <h2>Paste a URL and watch it get fixed.</h2>
+          <p>
+            The agent renders the page in headless Chromium, runs axe-core
+            against it, and gets a score. It then works one WCAG rule at a time:
+            propose edits, apply them to a private copy, re-audit, and keep the
+            change only if the score actually went up. You see both versions side
+            by side with every edit it made.
+          </p>
+          <ol className="landing-steps">
+            <li>Chromium renders the page and axe-core scores it</li>
+            <li>The agent fixes one rule, then re-audits to check itself</li>
+            <li>Anything that made the page worse is rolled back</li>
+          </ol>
+          <p className="landing-note">
+            Two to five minutes for a typical page. The site you point it at is
+            never modified — every edit lands on a copy.
+          </p>
+        </main>
       ) : null}
 
       {loadError && report ? (
