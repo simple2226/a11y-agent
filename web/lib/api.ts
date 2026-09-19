@@ -70,11 +70,21 @@ export function fetchReport(runId: string, pageId: string): Promise<ReportWithAr
   return getJson<ReportWithArtifacts>(`${API_BASE}/runs/${runId}/pages/${pageId}/report`);
 }
 
-/** Where the comparison iframes point for a given variant. */
+/**
+ * Where a comparison iframe points.
+ *
+ * Both modes go through /api/page-html, which injects the highlight bridge. A
+ * presigned S3 URL is proxied rather than used directly: the bridge has to be
+ * same-origin with the dashboard to receive postMessage, and the objects in S3
+ * stay byte-identical to what the pipeline wrote.
+ */
 export function frameSource(
   variant: "original" | "patched",
   report: ReportWithArtifacts | null,
 ): string {
-  if (IS_REMOTE) return report?.artifacts?.[variant] ?? "about:blank";
-  return `/api/page-html?variant=${variant}`;
+  if (!IS_REMOTE) return `/api/page-html?variant=${variant}`;
+
+  const artifact = report?.artifacts?.[variant];
+  if (!artifact) return "about:blank";
+  return `/api/page-html?src=${encodeURIComponent(artifact)}`;
 }

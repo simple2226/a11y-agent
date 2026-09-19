@@ -1,4 +1,12 @@
-
+# Amplify build spec for the dashboard.
+#
+# The Next.js app lives in web/, not at the repo root, so appRoot points there.
+# In the Amplify console set the app's root directory to "web" as well, and add
+# NEXT_PUBLIC_API_URL as an environment variable pointing at the deployed API:
+#   NEXT_PUBLIC_API_URL = https://<id>.execute-api.us-east-1.amazonaws.com
+#
+# NEXT_PUBLIC_* values are inlined at BUILD time, not read at runtime. Changing
+# the variable therefore requires a redeploy, not just a restart.
 version: 1
 applications:
   - appRoot: web
