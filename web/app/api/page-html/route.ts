@@ -76,6 +76,96 @@ const HIGHLIGHT_BRIDGE = `
     }
   });
 
+  // ------------------------------------------------------------------
+  // Navigation guard.
+  //
+  // The mirror injects <base href="https://the-real-site/"> so relative URLs
+  // for images and CSS resolve. That also means every link in the snapshot
+  // points at the live site, and clicking one makes the iframe navigate there.
+  // Most sites send X-Frame-Options, so the browser refuses and the preview is
+  // replaced by a "refused to connect" error page -- the comparison is gone
+  // until you re-run.
+  //
+  // This is a snapshot of one page, not a browsable site: there is nothing to
+  // navigate to. So clicks are swallowed and the reason is shown, rather than
+  // leaving a dead end that looks like a bug.
+  var NOTICE_ID = "a11y-agent-nav-notice";
+
+  function showNotice(message) {
+    var notice = document.getElementById(NOTICE_ID);
+    if (!notice) {
+      notice = document.createElement("div");
+      notice.id = NOTICE_ID;
+      notice.setAttribute("role", "status");
+      notice.style.cssText =
+        "position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:2147483647;" +
+        "max-width:min(34rem,90vw);padding:10px 14px;border-radius:6px;" +
+        "background:#1b2430;color:#fff;font:14px/1.45 system-ui,sans-serif;" +
+        "box-shadow:0 4px 16px rgba(0,0,0,.28);text-align:center;";
+      document.body.appendChild(notice);
+    }
+    notice.textContent = message;
+    notice.style.display = "block";
+    clearTimeout(showNotice.timer);
+    showNotice.timer = setTimeout(function () { notice.style.display = "none"; }, 2600);
+  }
+
+  // Capture phase, so a site's own handlers cannot get there first.
+  document.addEventListener("click", function (event) {
+    var anchor = event.target && event.target.closest ? event.target.closest("a[href]") : null;
+    if (!anchor) return;
+
+    var href = anchor.getAttribute("href") || "";
+
+    // A fragment link is NOT safe to let through here. <base href> makes "#main"
+    // resolve against the BASE url rather than the document, so a skip link
+    // navigates to https://the-real-site/#main and the preview is gone. Skip
+    // links are exactly what an accessibility reviewer wants to try, so they are
+    // honoured manually instead of being disabled.
+    if (href.charAt(0) === "#") {
+      event.preventDefault();
+      event.stopPropagation();
+      var id = href.slice(1);
+      if (!id) {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        return;
+      }
+      var target = null;
+      try {
+        target = document.getElementById(id) ||
+          document.querySelector('[name="' + CSS.escape(id) + '"]');
+      } catch (error) { /* exotic id, fall through */ }
+      if (target) {
+        target.scrollIntoView({ block: "start", behavior: "smooth" });
+        // Move focus too: a skip link that scrolls but does not focus is the
+        // bug this whole project exists to find.
+        if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+        target.focus({ preventScroll: true });
+      }
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    showNotice("This is a saved copy of one page, so links are disabled. Open the live site in a new tab to follow them.");
+  }, true);
+
+  document.addEventListener("submit", function (event) {
+    event.preventDefault();
+    event.stopPropagation();
+    showNotice("Forms are disabled in the preview -- nothing is ever sent to the real site.");
+  }, true);
+
+  // Inline scripts survive the mirror, and some of them call window.open on
+  // load. The sandbox blocks popups anyway, but silently -- this at least
+  // explains itself.
+  try {
+    window.open = function () {
+      showNotice("Pop-ups are disabled in the preview.");
+      return null;
+    };
+  } catch (error) { /* frozen in some documents; not worth failing over */ }
+
   parent.postMessage({ kind: "a11y-agent:ready" }, "*");
 })();
 </script>
