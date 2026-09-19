@@ -26,6 +26,8 @@ from __future__ import annotations
 import json
 import logging
 import operator
+import os
+import time
 from typing import Annotated, TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -42,6 +44,14 @@ logger = logging.getLogger(__name__)
 
 MAX_REPAIR_ATTEMPTS = 2
 MAX_CLUSTERS_PER_RUN = 8
+
+# How long the fixing loop may run before it stops taking on new rules and goes
+# to finalise with what it already has. This is not a safety net for a hung call
+# -- model_provider bounds those -- it is the difference between a run that goes
+# over time and still produces a before/after, and one the Lambda kills at 900s
+# leaving nothing at all. Default leaves room for the final audit and the S3
+# writes inside a 900s Lambda.
+RUN_BUDGET_SECONDS = float(os.environ.get("RUN_BUDGET_SECONDS", "600"))
 
 
 class RunState(TypedDict):
@@ -79,6 +89,9 @@ class RunState(TypedDict):
     score_after: int
     token_usage: TokenUsage
 
+    # time.monotonic() value past which no new cluster is started. 0 disables.
+    deadline: float
+
     log: Annotated[list[str], operator.add]
 
 
@@ -108,6 +121,7 @@ class StateUpdate(TypedDict, total=False):
     score_before: int
     score_after: int
     token_usage: TokenUsage
+    deadline: float
     log: list[str]
 
 
@@ -116,8 +130,10 @@ def initial_state(
     page_url: str,
     page_title: str,
     original_html: str,
+    budget_seconds: float | None = None,
 ) -> RunState:
     """Build a complete RunState. Call this instead of writing a dict literal."""
+    budget = RUN_BUDGET_SECONDS if budget_seconds is None else budget_seconds
     return RunState(
         run_id=run_id,
         page_url=page_url,
@@ -145,8 +161,19 @@ def initial_state(
         score_before=0,
         score_after=0,
         token_usage=TokenUsage(),
+        deadline=(time.monotonic() + budget) if budget > 0 else 0.0,
         log=[],
     )
+
+
+def out_of_time(state: RunState) -> bool:
+    deadline = state.get("deadline", 0.0)
+    return bool(deadline) and time.monotonic() >= deadline
+
+
+def seconds_left(state: RunState) -> int:
+    deadline = state.get("deadline", 0.0)
+    return max(0, int(deadline - time.monotonic())) if deadline else 0
 
 
 def node_audit_original(state: RunState) -> StateUpdate:
@@ -227,6 +254,15 @@ def node_generate_and_apply(state: RunState) -> StateUpdate:
     usage = state["token_usage"]
     usage.add(model_output.usage)
 
+    def with_snippets(applied) -> dict:
+        """The edit plus the markup it actually changed, for the diff view."""
+        return {
+            **applied.edit,
+            "matched_nodes": applied.matched_nodes,
+            "before_snippets": applied.before_snippets,
+            "after_snippets": applied.after_snippets,
+        }
+
     already_applied = set(state["applied_signatures"])
     fresh_edits = [
         edit for edit in model_output.edits if edit_signature(edit) not in already_applied
@@ -251,7 +287,7 @@ def node_generate_and_apply(state: RunState) -> StateUpdate:
         **snapshot,
         "working_html": apply_result.html,
         "accepted_edits": state["accepted_edits"]
-        + [applied.edit for applied in apply_result.applied],
+        + [with_snippets(applied) for applied in apply_result.applied],
         "applied_signatures": state["applied_signatures"]
         + [edit_signature(applied.edit) for applied in apply_result.applied],
         "deferred_items": state["deferred_items"] + fresh_deferred,
@@ -348,6 +384,11 @@ def route_after_verify(state: RunState) -> str:
     if state["repair_attempts"] >= MAX_REPAIR_ATTEMPTS:
         return "give_up"
 
+    # Out of budget: do not start another model call. give_up still rolls back
+    # anything this cluster broke, so stopping here is safe, not just quick.
+    if out_of_time(state):
+        return "give_up"
+
     # The pass changed nothing -- the model either returned nothing, or only
     # repeated edits that had already landed. Another identical prompt returns
     # the same thing; spending a call to prove it is waste.
@@ -432,6 +473,32 @@ def node_give_up(state: RunState) -> StateUpdate:
 
 
 def node_next_cluster(state: RunState) -> StateUpdate:
+    """Close out this rule, then stop early if the run is out of budget.
+
+    Stopping early is a real outcome, not an error: every cluster that already
+    finished is verified and kept, so the report still shows a genuine
+    before/after. The alternative -- starting a rule we cannot finish -- risks
+    the Lambda being killed mid-cluster, which produces nothing at all.
+    """
+    update = _close_cluster(state)
+
+    clusters = state["clusters"]
+    next_index = update.get("cluster_index", state["cluster_index"])
+    remaining = len(clusters) - next_index
+
+    if remaining > 0 and out_of_time(state):
+        skipped = [cluster.rule_id for cluster in clusters[next_index:]]
+        update["cluster_index"] = len(clusters)
+        update["unfixed_rules"] = list(update.get("unfixed_rules", state["unfixed_rules"])) + skipped
+        update["log"] = list(update.get("log", [])) + [
+            f"budget: time limit reached after {next_index} of {len(clusters)} rule(s); "
+            f"finalising with what has landed (skipped: {', '.join(skipped)})"
+        ]
+
+    return update
+
+
+def _close_cluster(state: RunState) -> StateUpdate:
     """Close out this rule and move on -- keeping its edits only if they helped.
 
     A cluster that resolved its own rule but left the page scoring no better is

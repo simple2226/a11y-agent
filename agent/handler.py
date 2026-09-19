@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 import time
+import traceback
 
-from agent.graph import build_graph, initial_state
+from agent.graph import RUN_BUDGET_SECONDS, build_graph, initial_state
 from audit.mirror import mirror
 from audit.scorer import compare
 from storage import dynamo_store, s3_store
@@ -19,9 +21,29 @@ from storage import dynamo_store, s3_store
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Time left at the end of the Lambda for the closing audit, the S3 writes and the
+# DynamoDB writes. The fixing loop stops this far before the Lambda would be
+# killed, so a run that goes long still produces a report.
+SHUTDOWN_RESERVE_SECONDS = 180
+
+# How often the heartbeat writes, while a single graph node is in flight. Nodes
+# take tens of seconds (a Chromium audit) to minutes (a model call), and without
+# this the page row's updatedAt freezes and the dashboard cannot tell a slow node
+# from a dead Lambda.
+HEARTBEAT_INTERVAL_SECONDS = 10
+
 
 def page_id_for(url: str) -> str:
     return hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
+
+
+def budget_for(context) -> float:
+    """Seconds the fixing loop may use, from whichever limit binds first."""
+    try:
+        remaining = context.get_remaining_time_in_millis() / 1000.0
+    except AttributeError:  # local invocation, no Lambda context
+        return RUN_BUDGET_SECONDS
+    return max(60.0, min(RUN_BUDGET_SECONDS, remaining - SHUTDOWN_RESERVE_SECONDS))
 
 
 def extract_title(html_text: str) -> str:
@@ -32,6 +54,14 @@ def extract_title(html_text: str) -> str:
 
 
 def lambda_handler(event: dict, context) -> dict:
+    """Run one page, and make sure *something* is written either way.
+
+    The failure path is the point of this wrapper. Without it a raised exception
+    or a killed Lambda leaves the page row on status "running" for ever: the
+    dashboard keeps polling, the spinner keeps spinning, and there is nothing
+    anywhere that says what went wrong. In front of a judge that is
+    indistinguishable from a product that does not work.
+    """
     run_id = event["runId"]
     url = event["url"]
     page_id = page_id_for(url)
@@ -39,6 +69,48 @@ def lambda_handler(event: dict, context) -> dict:
 
     logger.info("run=%s page=%s url=%s", run_id, page_id, url)
 
+    # Written before anything can fail, so even a mirror error has a row to
+    # attach itself to.
+    dynamo_store.put_page(run_id, page_id, {"url": url, "status": "running"})
+
+    try:
+        return _run_page(run_id, page_id, url, started_at, context)
+    except Exception as error:  # noqa: BLE001 -- re-raised below
+        logger.exception("run=%s page=%s failed", run_id, page_id)
+        _record_failure(run_id, page_id, url, error, started_at)
+        raise
+
+
+def _record_failure(run_id: str, page_id: str, url: str, error: Exception, started_at: float) -> None:
+    """Best effort. A failure to record the failure must not mask the failure."""
+    try:
+        dynamo_store.update_page_fields(
+            run_id,
+            page_id,
+            {
+                "url": url,
+                "status": "failed",
+                "error": f"{type(error).__name__}: {error}"[:900],
+                "errorTrace": traceback.format_exc()[-1500:],
+                "elapsedSeconds": round(time.time() - started_at, 1),
+                "failedAt": int(time.time()),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("could not record failure for run=%s page=%s", run_id, page_id)
+
+
+def _next_phase(clusters: list, done: int, progress_log: list[str]) -> str:
+    """A sentence about the work in flight, not the work just finished."""
+    if done < len(clusters):
+        rule_id = getattr(clusters[done], "rule_id", "the next rule")
+        return f"fixing {rule_id} ({done + 1} of {len(clusters)}) — waiting on the model"
+    if clusters:
+        return "re-auditing the patched page"
+    return progress_log[-1] if progress_log else "starting up"
+
+
+def _run_page(run_id: str, page_id: str, url: str, started_at: float, context) -> dict:
     mirrored = mirror(url)
     original_key = s3_store.put_html(run_id, page_id, "original", mirrored.html)
 
@@ -65,44 +137,80 @@ def lambda_handler(event: dict, context) -> dict:
     final_state: dict = {}
     progress_log: list[str] = []
 
-    def record_progress(phase: str, done: int, total: int) -> None:
-        dynamo_store.update_page_progress(
-            run_id,
-            page_id,
-            {
-                "phase": phase,
-                "clustersDone": done,
-                "clustersTotal": total,
-                "log": progress_log[-40:],
-                "updatedAt": int(time.time()),
-            },
-        )
+    # What is happening *now*, as opposed to the log, which is what already
+    # happened. A model call takes a minute or more and the last log line during
+    # it reads "cluster: 3 cluster(s) queued" -- which looks like a hang.
+    phase_state = {"phase": "auditing the original page", "done": 0, "total": 0}
+    write_lock = threading.Lock()
 
-    record_progress("auditing the original page", 0, 0)
+    def record_progress() -> None:
+        """One writer, so the heartbeat and the stream cannot interleave."""
+        with write_lock:
+            try:
+                dynamo_store.update_page_progress(
+                    run_id,
+                    page_id,
+                    {
+                        "phase": phase_state["phase"],
+                        "clustersDone": phase_state["done"],
+                        "clustersTotal": phase_state["total"],
+                        "log": progress_log[-40:],
+                        "elapsedSeconds": int(time.time() - started_at),
+                        "updatedAt": int(time.time()),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                # Progress is a convenience. Losing a write must not kill a run
+                # that is otherwise going fine.
+                logger.warning("progress write failed", exc_info=True)
 
-    for update in graph.stream(
-        initial_state(
-            run_id=run_id,
-            page_url=mirrored.final_url,
-            page_title=extract_title(mirrored.html),
-            original_html=mirrored.html,
-        ),
-        config={"recursion_limit": 100},
-        stream_mode="values",
-    ):
-        final_state = update
+    record_progress()
 
-        new_lines = update.get("log", [])[len(progress_log):]
-        if new_lines:
-            progress_log.extend(new_lines)
+    # Heartbeat: keeps updatedAt moving while a single node is in flight, which
+    # is what lets the dashboard distinguish "slow" from "dead".
+    stop_heartbeat = threading.Event()
 
-        clusters = update.get("clusters") or []
-        done = min(update.get("cluster_index", 0), len(clusters))
-        phase = progress_log[-1] if progress_log else "starting"
+    def heartbeat() -> None:
+        while not stop_heartbeat.wait(HEARTBEAT_INTERVAL_SECONDS):
+            record_progress()
 
-        if new_lines:
-            logger.info("progress: %s", phase)
-            record_progress(phase, done, len(clusters))
+    heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+    heartbeat_thread.start()
+
+    try:
+        for update in graph.stream(
+            initial_state(
+                run_id=run_id,
+                page_url=mirrored.final_url,
+                page_title=extract_title(mirrored.html),
+                original_html=mirrored.html,
+                budget_seconds=budget_for(context),
+            ),
+            config={"recursion_limit": 100},
+            stream_mode="values",
+        ):
+            final_state = update
+
+            new_lines = update.get("log", [])[len(progress_log):]
+            if new_lines:
+                progress_log.extend(new_lines)
+
+            clusters = update.get("clusters") or []
+            done = min(update.get("cluster_index", 0), len(clusters))
+
+            phase_state["done"] = done
+            phase_state["total"] = len(clusters)
+            phase_state["phase"] = _next_phase(clusters, done, progress_log)
+
+            if new_lines:
+                logger.info("progress: %s", progress_log[-1])
+            record_progress()
+    finally:
+        stop_heartbeat.set()
+        heartbeat_thread.join(timeout=2)
+
+    phase_state["phase"] = "writing the report"
+    record_progress()
 
     patched_key = s3_store.put_html(run_id, page_id, "patched", final_state["working_html"])
     delta = compare(final_state["original_violations"], final_state["final_violations"])
@@ -222,7 +330,7 @@ def lambda_handler(event: dict, context) -> dict:
             "patchedKey": patched_key,
             "axeKey": axe_key,
             "reportKey": report_key,
-            "reportKey": report_key,
+            "error": None,
             "scoreBefore": delta.score_before,
             "scoreAfter": delta.score_after,
             "fixedRules": delta.fixed_rules,

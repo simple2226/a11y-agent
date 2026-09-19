@@ -65,10 +65,19 @@ def get_run(run_id: str) -> dict:
 
     pages = dynamo_store.list_run_items(run_id, "PAGE#")
     finished = [page for page in pages if page.get("status") == "done"]
+    failed = [page for page in pages if page.get("status") == "failed"]
     expected = len(run.get("urls", []))
 
+    # A run is only "failed" once nothing is still working. With several pages in
+    # flight one can fail while the rest succeed, and that run is partly usable.
     if expected and len(finished) >= expected:
         derived_status = "done"
+    elif failed and len(finished) + len(failed) >= max(expected, len(pages)):
+        derived_status = "done" if finished else "failed"
+    elif run.get("status") == "failed":
+        # Written by the Step Functions catch when the Lambda was killed outright
+        # and could not record its own failure. Nothing is still working.
+        derived_status = "failed"
     elif pages:
         derived_status = "running"
     else:
@@ -77,6 +86,7 @@ def get_run(run_id: str) -> dict:
     return {
         "runId": run_id,
         "status": derived_status,
+        "error": run.get("error") if derived_status == "failed" else None,
         "urls": run.get("urls", []),
         "pages": [
             {
@@ -88,11 +98,15 @@ def get_run(run_id: str) -> dict:
                 "scoreAfter": page.get("scoreAfter"),
                 # Live progress while the agent is still working.
                 "progress": page.get("progress"),
+                # Present only on a page that failed, so the dashboard can say
+                # what went wrong instead of spinning.
+                "error": page.get("error"),
             }
             for page in pages
         ],
         "aggregate": {
             "pagesDone": len(finished),
+            "pagesFailed": len(failed),
             "pagesTotal": len(run.get("urls", [])),
             "scoreBefore": _mean(page.get("scoreBefore") for page in finished),
             "scoreAfter": _mean(page.get("scoreAfter") for page in finished),

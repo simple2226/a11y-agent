@@ -307,6 +307,39 @@ opposing ones, per rule.
   `AWS_LAMBDA_FUNCTION_NAME` at runtime. `scripts/smoke_image.py` verifies all
   of this inside the built image, before a 2 GB push to ECR.
 
+### A hang is a worse failure than an error
+
+A run stopped dead after the clustering step and stayed there. The dashboard
+kept polling, the spinner kept turning, and the last log line still read
+`cluster: 3 cluster(s) queued` — which is exactly what a healthy run looks like
+one second in. Nothing anywhere said what had happened.
+
+Three separate faults lined up:
+
+- **The retry policy could outlive the Lambda.** Five attempts at a 180-second
+  timeout with 30-second backoffs is seventeen minutes inside a fifteen-minute
+  function. The Lambda was killed mid-call, so the `finally` never ran and no
+  result was ever written.
+- **The handler had no `except`.** A raised exception left the page row on
+  `status: "running"` for ever. There was no state in the system that meant
+  *failed*.
+- **Progress was written per node, not per second.** The longest node is the
+  model call, and during it `updatedAt` froze — so nothing could tell a slow run
+  from a dead one, in the UI or by eye.
+
+The fix is three nested budgets — 75s per HTTP attempt, 240s per model call
+including retries, 600s for the fixing loop inside a 900s Lambda — plus a
+ten-second heartbeat, a failure row written by the handler, and a second one
+written by the Step Functions catch for the case where the handler itself is
+killed. The loop now reports the time limit as an outcome (`budget: time limit
+reached after 1 of 3 rule(s)`) and finalises with the rules it did finish, which
+still produces a real before/after.
+
+The general lesson: **every wait needs a bound, and every bound needs somewhere
+to write when it is hit.** An agent that says "gemini gave up after 240s — quota
+exhausted" is a working product with a bad afternoon. The same agent showing a
+spinner is indistinguishable from one that does not work at all.
+
 ### What we would do differently
 
 Write the diagnostic before the feature. `inspect_mirror.py`, `check_bedrock.py`
@@ -337,5 +370,9 @@ Design notes, since Best UI is judged:
   deferred, then fixed. The bad news is the first thing you see.
 - Focus rings are visible and deliberate; `prefers-reduced-motion` is respected;
   frames are labelled for screen readers.
-- The highlight bridge is injected when HTML is served, so the mirrored files on
-  disk stay byte-identical to what the pipeline produced.
+- The highlight bridge is injected when the HTML is served, never written into
+  the artifact. Deployed, the iframes load through `/api/page-html?src=…`,
+  which fetches the presigned S3 object, injects the bridge and serves it
+  same-origin — postMessage needs the same origin, and the stored artifact
+  stays byte-identical to what the pipeline produced. That proxy only accepts
+  `https` URLs on S3 hostnames, so it is not an open proxy.

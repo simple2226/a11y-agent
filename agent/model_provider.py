@@ -29,13 +29,23 @@ import httpx
 from agent.bedrock_client import ModelEdits
 from agent.schema import TOOL_NAME, TOOL_SPEC
 
-REQUEST_TIMEOUT_SECONDS = 180
+# A structured-output call of this size answers in seconds. One that has not
+# answered in a minute is not about to; waiting longer only spends the Lambda's
+# budget on a request that will fail anyway.
+REQUEST_TIMEOUT_SECONDS = float(os.environ.get("MODEL_REQUEST_TIMEOUT_SECONDS", "75"))
 
 # Every hosted model API rate limits and sheds load. Without retries here, one
 # transient 503 fails the Lambda, Step Functions retries the WHOLE invocation,
 # and the mirror plus every audit runs again from scratch -- minutes of work
 # thrown away for a blip that a two second wait would have cleared.
 MAX_ATTEMPTS = 5
+
+# ...but retries must not become their own hang. Five attempts at the old 180s
+# timeout, each followed by a 30s backoff, is 17 minutes -- longer than the
+# Lambda lives. The Lambda is then killed mid-call, nothing writes a result, and
+# the dashboard sits on "0 of 3 rules" forever with no error to show. This is the
+# ceiling on one logical model call including all of its retries.
+MODEL_CALL_BUDGET_SECONDS = float(os.environ.get("MODEL_CALL_BUDGET_SECONDS", "240"))
 # 404 is deliberately absent: a retired model name never comes back, and
 # retrying it just burns the backoff budget before reporting the real problem.
 RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -86,10 +96,29 @@ def _explain_http_failure(response: httpx.Response) -> str:
 
 
 def _post_with_retry(provider: str, **request_kwargs) -> httpx.Response:
-    """POST, retrying transient failures. Returns a 2xx response or raises."""
+    """POST, retrying transient failures. Returns a 2xx response or raises.
+
+    Bounded twice over: MAX_ATTEMPTS caps how many times we ask, and
+    MODEL_CALL_BUDGET_SECONDS caps how long the whole thing may take. The
+    deadline is the one that matters operationally -- it is what turns "the
+    demo hung" into "the demo said what went wrong".
+    """
     last_detail = "no attempt made"
+    deadline = time.monotonic() + MODEL_CALL_BUDGET_SECONDS
 
     for attempt in range(MAX_ATTEMPTS):
+        remaining = deadline - time.monotonic()
+        if remaining <= 1.0:
+            raise ProviderError(
+                f"{provider} gave up after {MODEL_CALL_BUDGET_SECONDS:.0f}s "
+                f"({attempt} attempt(s)) -- {last_detail}"
+            )
+
+        # Never let a single attempt outlive the budget.
+        request_kwargs["timeout"] = min(
+            float(request_kwargs.get("timeout", REQUEST_TIMEOUT_SECONDS)), remaining
+        )
+
         try:
             response = httpx.post(**request_kwargs)
         except (httpx.TimeoutException, httpx.TransportError) as error:
@@ -108,7 +137,9 @@ def _post_with_retry(provider: str, **request_kwargs) -> httpx.Response:
                 )
 
             if attempt + 1 < MAX_ATTEMPTS:
-                delay = _backoff_seconds(attempt, response)
+                delay = min(_backoff_seconds(attempt, response), deadline - time.monotonic())
+                if delay <= 0:
+                    break
                 print(
                     f"{provider}: {response.status_code} on attempt {attempt + 1}"
                     f"/{MAX_ATTEMPTS}, retrying in {delay:.1f}s",
@@ -118,7 +149,9 @@ def _post_with_retry(provider: str, **request_kwargs) -> httpx.Response:
                 continue
 
         if attempt + 1 < MAX_ATTEMPTS:
-            delay = _backoff_seconds(attempt)
+            delay = min(_backoff_seconds(attempt), deadline - time.monotonic())
+            if delay <= 0:
+                break
             print(
                 f"{provider}: {last_detail} on attempt {attempt + 1}/{MAX_ATTEMPTS}, "
                 f"retrying in {delay:.1f}s",

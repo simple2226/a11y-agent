@@ -42,6 +42,15 @@ Globals:
         MODEL_PROVIDER: !Ref ModelProvider
         GEMINI_API_KEY: !Ref GeminiApiKey
         GEMINI_MODEL: !Ref GeminiModel
+        # Three nested budgets, innermost first. Together they guarantee the
+        # Lambda finishes and writes a report rather than being killed at 900s
+        # with nothing to show.
+        #   one HTTP attempt          75s
+        #   one model call + retries 240s
+        #   the whole fixing loop    600s, leaving 180s to finalise and write
+        MODEL_REQUEST_TIMEOUT_SECONDS: "75"
+        MODEL_CALL_BUDGET_SECONDS: "240"
+        RUN_BUDGET_SECONDS: "600"
 
 Resources:
 
@@ -179,8 +188,29 @@ Resources:
                       ResultPath: $.error
                       Next: RecordFailure
                   End: true
+                # The Lambda records its own failures. This state is for the one
+                # case where it cannot: the invocation is killed (States.Timeout,
+                # out of memory), so no Python runs at all. Without it the run
+                # row sits on "running" for ever and the dashboard spins.
                 RecordFailure:
-                  Type: Pass
+                  Type: Task
+                  Resource: arn:aws:states:::dynamodb:updateItem
+                  Parameters:
+                    TableName: !Ref RunTable
+                    Key:
+                      pk:
+                        S.$: States.Format('RUN#{}', $.runId)
+                      sk:
+                        S: META
+                    UpdateExpression: "SET #status = :status, #error = :error"
+                    ExpressionAttributeNames:
+                      "#status": status
+                      "#error": error
+                    ExpressionAttributeValues:
+                      ":status":
+                        S: failed
+                      ":error":
+                        S.$: States.Format('{} while processing {}', $.error.Error, $.url)
                   End: true
             ResultPath: $.pageResults
             End: true

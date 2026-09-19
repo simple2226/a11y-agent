@@ -595,3 +595,63 @@ button { font: inherit; color: inherit; }
   color: var(--ink-soft);
   font-size: 0.875rem;
 }
+
+.progress-elapsed {
+  font-weight: 400;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A stall and a failure are different claims and are allowed to look different:
+   amber means "this might still recover", red means "it will not". */
+.progress-stall {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0 0 1.25rem;
+  padding: 0.75rem 0.875rem;
+  border: 1px solid var(--defer);
+  border-left-width: 3px;
+  border-radius: 3px;
+  background: #fdf6e7;
+  color: var(--ink);
+  font-size: 0.875rem;
+}
+
+.progress-panel--failed .progress-title {
+  color: var(--fail);
+  margin-bottom: 0.5rem;
+}
+
+.progress-error {
+  margin: 0 0 1.25rem;
+  padding: 0.75rem 0.875rem;
+  border: 1px solid var(--fail);
+  border-left-width: 3px;
+  border-radius: 3px;
+  background: #fdeceb;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.progress-retry {
+  flex: none;
+  padding: 0.4rem 0.9rem;
+  margin-top: 1rem;
+  border: 1px solid var(--ink);
+  border-radius: 3px;
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+.progress-stall .progress-retry { margin-top: 0; }
+.progress-retry:hover { background: var(--paper); }
+.progress-retry:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}

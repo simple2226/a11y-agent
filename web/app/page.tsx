@@ -11,6 +11,7 @@ import {
   IS_REMOTE,
   fetchReport,
   fetchRun,
+  runFailure,
   type ReportWithArtifacts,
   type RunSummary,
 } from "@/lib/api";
@@ -68,7 +69,11 @@ export default function Dashboard() {
         setReport(await fetchReport(id, target.pageId));
       }
 
-      const stillRunning = summary.aggregate.pagesDone < summary.aggregate.pagesTotal;
+      // A failed run never becomes a finished one. Polling it for ever is what
+      // makes a broken run look like a slow one.
+      const stillRunning =
+        summary.aggregate.pagesDone < summary.aggregate.pagesTotal &&
+        !runFailure(summary);
       if (stillRunning) {
         pollTimer.current = setTimeout(() => poll(id), POLL_INTERVAL_MS);
       }
@@ -98,6 +103,13 @@ export default function Dashboard() {
 
   const selectedRow = rows.find((row) => row.ruleId === selectedRuleId) ?? null;
   const waiting = Boolean(runId) && !report;
+
+  const resetRun = useCallback(() => {
+    if (pollTimer.current) clearTimeout(pollTimer.current);
+    setRun(null);
+    setLoadError(null);
+    setRunId(null);
+  }, [setRunId]);
 
   if (!report && !loadError && !IS_REMOTE) {
     return (
@@ -129,7 +141,13 @@ export default function Dashboard() {
 
       {report && !waiting ? <VerdictBar report={report} rows={rows} /> : null}
 
-      {waiting ? <RunProgressPanel run={run} url={run?.urls?.[0] ?? null} /> : null}
+      {waiting ? (
+        <RunProgressPanel
+          run={run}
+          url={run?.urls?.[0] ?? null}
+          onRetry={resetRun}
+        />
+      ) : null}
 
       {report && !waiting ? (
         <div className="workspace">

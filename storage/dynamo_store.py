@@ -113,6 +113,26 @@ def update_page_progress(run_id: str, page_id: str, progress: dict) -> None:
     )
 
 
+def update_page_fields(run_id: str, page_id: str, fields: dict) -> None:
+    """Merge arbitrary attributes into an existing page row.
+
+    Used to mark a page failed without losing the url, title and artifact keys
+    written when it started -- a failed run still has a mirrored original worth
+    showing, and the UI needs the url to say what failed.
+    """
+    if not fields:
+        return
+    expression = "SET " + ", ".join(f"#{key} = :{key}" for key in fields)
+    _table().update_item(
+        Key={"pk": f"RUN#{run_id}", "sk": f"PAGE#{page_id}"},
+        UpdateExpression=expression,
+        ExpressionAttributeNames={f"#{key}": key for key in fields},
+        ExpressionAttributeValues={
+            f":{key}": _to_dynamo(value) for key, value in fields.items()
+        },
+    )
+
+
 def get_run(run_id: str) -> dict | None:
     response = _table().get_item(Key={"pk": f"RUN#{run_id}", "sk": "META"})
     item = response.get("Item")

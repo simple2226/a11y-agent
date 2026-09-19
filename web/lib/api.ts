@@ -17,6 +17,10 @@ export interface RunProgress {
   clustersDone: number;
   clustersTotal: number;
   log: string[];
+  /** Seconds since the page started, as the Lambda measured it. */
+  elapsedSeconds?: number;
+  /** Unix seconds. The Lambda heartbeats this every 10s, so a value that stops
+   *  advancing means the invocation died rather than that a node is slow. */
   updatedAt: number;
 }
 
@@ -29,19 +33,48 @@ export interface PageSummary {
   scoreAfter: number | null;
   /** Written by the agent Lambda after every graph node while a run is live. */
   progress?: RunProgress | null;
+  /** Set only when status === "failed". */
+  error?: string | null;
 }
 
 export interface RunSummary {
   runId: string;
   status: string;
+  /** Set when the run failed outside the agent — a killed Lambda, say. */
+  error?: string | null;
   urls: string[];
   pages: PageSummary[];
   aggregate: {
     pagesDone: number;
+    pagesFailed?: number;
     pagesTotal: number;
     scoreBefore: number | null;
     scoreAfter: number | null;
   };
+}
+
+/** Seconds with no heartbeat before the UI stops claiming the run is healthy.
+ *  The Lambda beats every 10s; 75s is six missed beats plus slack for a slow
+ *  DynamoDB write, so this does not fire on a merely slow run. */
+export const STALL_THRESHOLD_SECONDS = 75;
+
+export function runFailure(run: RunSummary | null): string | null {
+  if (!run) return null;
+
+  const failedPage = run.pages.find((page) => page.status === "failed");
+  if (failedPage) return failedPage.error || "The agent stopped with an error.";
+  if (run.status === "failed") {
+    return run.error || "The run stopped with an error.";
+  }
+
+  return null;
+}
+
+/** Seconds since the last heartbeat, or null when there is nothing to judge. */
+export function secondsSinceHeartbeat(run: RunSummary | null): number | null {
+  const updatedAt = run?.pages?.[0]?.progress?.updatedAt;
+  if (!updatedAt) return null;
+  return Math.max(0, Math.round(Date.now() / 1000 - updatedAt));
 }
 
 export interface ReportWithArtifacts extends Report {
