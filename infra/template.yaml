@@ -17,16 +17,31 @@ Parameters:
   ModelProvider:
     Type: String
     Default: bedrock
-    AllowedValues: [bedrock, gemini, anthropic, openai, mock]
-    Description: Which model backend the agent calls.
+    AllowedPattern: "^[a-z]+(,[a-z]+)*$"
+    Description: >-
+      Which model backend the agent calls. Accepts a comma-separated fallback
+      chain tried in order, e.g. "gemini,groq,mock" -- a free-tier endpoint
+      answering 503 "high demand" is capacity, not a bug, and a second provider
+      is the only real remedy. Known: bedrock, gemini, anthropic, openai, groq,
+      openrouter, ollama, mock. No spaces.
   GeminiApiKey:
     Type: String
     Default: ""
     NoEcho: true
-    Description: Only needed when ModelProvider is gemini. A Google AI Studio key.
+    Description: Only needed when gemini is in the chain. A Google AI Studio key.
   GeminiModel:
     Type: String
     Default: gemini-flash-latest
+  GroqApiKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >-
+      Only needed when groq is in the chain. Free from console.groq.com; it is
+      the fastest thing to reach for when Gemini's free tier sheds load.
+  GroqModel:
+    Type: String
+    Default: llama-3.3-70b-versatile
 
 Globals:
   Function:
@@ -42,6 +57,8 @@ Globals:
         MODEL_PROVIDER: !Ref ModelProvider
         GEMINI_API_KEY: !Ref GeminiApiKey
         GEMINI_MODEL: !Ref GeminiModel
+        GROQ_API_KEY: !Ref GroqApiKey
+        GROQ_MODEL: !Ref GroqModel
         # Three nested budgets, innermost first. Together they guarantee the
         # Lambda finishes and writes a report rather than being killed at 900s
         # with nothing to show.
