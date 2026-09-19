@@ -16,6 +16,7 @@ Strategy, in order of importance:
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
@@ -25,6 +26,13 @@ from bs4 import BeautifulSoup
 USER_AGENT = "a11y-agent/0.1 (accessibility audit; +https://github.com/YOURNAME/a11y-agent)"
 
 REQUEST_TIMEOUT_SECONDS = 20
+
+# The page fetch is the most fragile step in the pipeline and the one furthest
+# outside our control: one refused connection to a university site on a bad link
+# used to kill the whole run before a single row was written.
+PAGE_FETCH_ATTEMPTS = 3
+PAGE_FETCH_BACKOFF_SECONDS = 3.0
+RETRYABLE_PAGE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
 CSS_URL_PATTERN = re.compile(r"""url\(\s*(['"]?)([^'")]+)\1\s*\)""", re.IGNORECASE)
 
@@ -56,20 +64,64 @@ class MirroredPage:
     notes: list[str] = field(default_factory=list)
 
 
+class MirrorError(RuntimeError):
+    """The page could not be fetched. Carries something worth reading."""
+
+
 def fetch_page(url: str) -> tuple[str, int, str]:
-    """Return (html_text, status_code, final_url_after_redirects)."""
-    with httpx.Client(
-        follow_redirects=True,
-        timeout=REQUEST_TIMEOUT_SECONDS,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml",
-            "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
-        },
-    ) as client:
-        response = client.get(url)
-        response.raise_for_status()
-        return response.text, response.status_code, str(response.url)
+    """Return (html_text, status_code, final_url_after_redirects).
+
+    Retried, because this is the single most fragile step in the pipeline and
+    the one furthest from our control. A university site on a wobbly link
+    refuses one connection in five; without a retry here that is a dead run and
+    a spinner, for a site that would have answered a second later.
+    """
+    last_error = "no attempt made"
+
+    for attempt in range(PAGE_FETCH_ATTEMPTS):
+        try:
+            with httpx.Client(
+                follow_redirects=True,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+                headers={
+                    "User-Agent": USER_AGENT,
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
+                },
+            ) as client:
+                response = client.get(url)
+
+            if response.status_code in RETRYABLE_PAGE_STATUS:
+                last_error = f"HTTP {response.status_code} from the site"
+            else:
+                response.raise_for_status()
+                return response.text, response.status_code, str(response.url)
+
+        except httpx.HTTPStatusError as error:
+            # 404, 403, 401 -- the site answered and said no. Retrying is rude
+            # and pointless.
+            raise MirrorError(
+                f"{url} returned HTTP {error.response.status_code}. "
+                f"The page is not publicly fetchable, so there is nothing to audit."
+            ) from error
+
+        except httpx.HTTPError as error:
+            last_error = f"{type(error).__name__}: {error}"
+
+        if attempt + 1 < PAGE_FETCH_ATTEMPTS:
+            delay = PAGE_FETCH_BACKOFF_SECONDS * (2 ** attempt)
+            print(
+                f"mirror: {last_error} fetching {url} "
+                f"(attempt {attempt + 1}/{PAGE_FETCH_ATTEMPTS}), retrying in {delay:.0f}s",
+                flush=True,
+            )
+            time.sleep(delay)
+
+    raise MirrorError(
+        f"could not fetch {url} after {PAGE_FETCH_ATTEMPTS} attempts -- {last_error}.\n"
+        f"The site is unreachable from here rather than broken in our code: check it "
+        f"loads in a browser, then try a different page."
+    )
 
 
 def _strip_csp_meta_tags(soup: BeautifulSoup) -> int:

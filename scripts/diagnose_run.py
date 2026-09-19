@@ -131,27 +131,42 @@ def show_execution(state_machine_arn: str, region: str, run_id: str) -> str:
     return status
 
 
-def show_logs(function_name: str, region: str, minutes: int) -> None:
+def show_logs(function_name: str, region: str, minutes: int, lines: int) -> None:
+    """The tail of the agent's log, unfiltered.
+
+    Deliberately no filterPattern. A Python traceback arrives as several events
+    and the interesting line is rarely the one containing the word "error" --
+    filtering shredded exactly the exception we needed to read.
+    """
     client = boto3.client("logs", region_name=region)
     group = f"/aws/lambda/{function_name}"
     start = int((time.time() - minutes * 60) * 1000)
+
+    collected: list[str] = []
     try:
-        response = client.filter_log_events(
-            logGroupName=group,
-            startTime=start,
-            filterPattern="?ERROR ?Error ?error ?Task ?timed ?progress",
+        pages = client.get_paginator("filter_log_events").paginate(
+            logGroupName=group, startTime=start
         )
+        for page in pages:
+            for event in page.get("events", []):
+                message = str(cast(dict[str, Any], event).get("message", "")).rstrip()
+                collected.extend(message.splitlines() or [""])
+            # A long window on a busy function is not worth paging through in
+            # full; the tail is what matters and it is at the end.
+            if len(collected) > 4000:
+                break
     except client.exceptions.ResourceNotFoundException:
         print(f"  no log group {group} yet -- the Lambda has never run")
         return
 
-    events = [cast(dict[str, Any], event) for event in response.get("events", [])]
-    if not events:
-        print(f"  nothing matching in the last {minutes} minutes")
+    if not collected:
+        print(f"  no log events in the last {minutes} minutes (try --minutes 120)")
         return
 
-    for event in events[-25:]:
-        print(f"  {str(event.get('message', '')).rstrip()}")
+    if len(collected) > lines:
+        print(f"  ... {len(collected) - lines} earlier line(s) omitted, --lines to see more")
+    for line in collected[-lines:]:
+        print(f"  {line}")
 
 
 def find_agent_function(stack_name: str, region: str) -> str | None:
@@ -171,12 +186,39 @@ def find_agent_function(stack_name: str, region: str) -> str | None:
     return None
 
 
+def show_deployment(function_name: str, region: str) -> None:
+    """When the agent was last deployed, and which config it is running.
+
+    "Did my deploy take?" is otherwise answered by guessing. The presence of
+    RUN_BUDGET_SECONDS is a direct probe: it only exists in the template that
+    also fixed the failure path, so if it is missing, the running Lambda is the
+    old one however recently it was pushed.
+    """
+    client = boto3.client("lambda", region_name=region)
+    config = cast(dict[str, Any], client.get_function_configuration(FunctionName=function_name))
+
+    environment = cast(dict[str, Any], config.get("Environment") or {})
+    variables = cast(dict[str, Any], environment.get("Variables") or {})
+
+    print(f"  last modified: {config.get('LastModified')}")
+    print(f"  provider chain: {variables.get('MODEL_PROVIDER', '(unset)')}")
+
+    if "RUN_BUDGET_SECONDS" in variables:
+        print(f"  budgets: run={variables['RUN_BUDGET_SECONDS']}s "
+              f"call={variables.get('MODEL_CALL_BUDGET_SECONDS')}s "
+              f"request={variables.get('MODEL_REQUEST_TIMEOUT_SECONDS')}s")
+    else:
+        print("  budgets: MISSING -- this is the OLD template. Failures will not be")
+        print("           recorded and the dashboard will spin. Run infra/deploy.ps1.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("run_id")
     parser.add_argument("--stack", default="a11y-agent")
     parser.add_argument("--region", default="us-east-1")
-    parser.add_argument("--minutes", type=int, default=20)
+    parser.add_argument("--minutes", type=int, default=30)
+    parser.add_argument("--lines", type=int, default=60, help="log tail length")
     args = parser.parse_args()
 
     outputs = stack_outputs(args.stack, args.region)
@@ -187,12 +229,17 @@ def main() -> None:
     print("\n== step functions ==")
     execution_status = show_execution(outputs["StateMachineArn"], args.region, args.run_id)
 
-    print("\n== agent logs ==")
     agent_function = find_agent_function(args.stack, args.region)
+
+    print("\n== deployment ==")
     if agent_function:
-        show_logs(agent_function, args.region, args.minutes)
+        show_deployment(agent_function, args.region)
     else:
         print(f"  could not find a {args.stack}-AgentFunction-* Lambda")
+
+    print("\n== agent logs ==")
+    if agent_function:
+        show_logs(agent_function, args.region, args.minutes, args.lines)
 
     print("\n== verdict ==")
     print("  " + verdict(execution_status, page_statuses))
@@ -202,6 +249,19 @@ def main() -> None:
 def verdict(execution_status: str, page_statuses: list[str]) -> str:
     """Name the failure mode, rather than leaving two readings side by side."""
     unfinished = [status for status in page_statuses if status == "running"]
+
+    # No page row at all is its own failure, and a distinctive one: the agent
+    # died before it could write anything, which means it never got past the
+    # mirror. Reading this as "completed" because no page is unfinished was a
+    # bug in this function.
+    if not page_statuses:
+        if execution_status in {"SUCCEEDED", "FAILED", "TIMED_OUT", "ABORTED"}:
+            return (
+                "the agent never wrote a page row -- it died before or during the\n"
+                "  mirror, so the cause is a page fetch, not the model. The traceback\n"
+                "  is in the agent logs above."
+            )
+        return "no page row yet; the agent has not reached its first write"
 
     if execution_status == "SUCCEEDED" and unfinished:
         return (
