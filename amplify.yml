@@ -1,45 +1,47 @@
-# Amplify build spec.
+# Amplify build spec -- Next.js SSR app in a subdirectory.
 #
-# The Next.js app lives in web/, not at the repo root.
+# The `applications:` / `appRoot:` (monorepo) form is REQUIRED here, not a
+# style choice. Amplify's Next.js adapter is what writes deploy-manifest.json,
+# and it only runs when Amplify knows where the Next.js app lives. Build the
+# app with `cd` or `npm --prefix` from a plain spec and the build succeeds but
+# the deploy fails with:
 #
-# Note there is no `cd`. Amplify runs a phase's commands in one shell and the
-# working directory CARRIES OVER between phases, so a `cd web` in preBuild
-# leaves the build phase already inside web/ and a second `cd web` fails with
-# "No such file or directory". `npm --prefix` never changes directory, so it
-# behaves the same however Amplify chooses to sequence the phases.
+#   CustomerError: Failed to find the deploy-manifest.json file in the build output
 #
-# Because cwd stays at the repo root, artifacts.baseDirectory is web/.next.
+# Because appRoot is web, every path below is relative to web/ -- so
+# baseDirectory is .next, NOT web/.next.
 #
-# Still required in the console:
-#   Environment variables: NEXT_PUBLIC_API_URL = https://<id>.execute-api.<region>.amazonaws.com
-#   Platform must be WEB_COMPUTE (Next.js SSR) -- /api/page-html proxies
-#   artifacts at request time, so a static deploy cannot serve this app.
+# This form also needs a matching environment variable, or Amplify ignores it:
+#   AMPLIFY_MONOREPO_APP_ROOT = web
+#
+# And the app platform must be WEB_COMPUTE. /api/page-html proxies artifacts at
+# request time, so a static deploy cannot serve this app.
 version: 1
-frontend:
-  phases:
-    preBuild:
-      commands:
-        - node --version
-        - pwd
-        # npm ci needs a committed package-lock.json; fall back if absent.
-        - npm --prefix web ci || npm --prefix web install
-    build:
-      commands:
-        - |
-          if [ -z "$NEXT_PUBLIC_API_URL" ]; then
-            echo "NEXT_PUBLIC_API_URL is not set. The dashboard would build in"
-            echo "local-file mode and show 'No run to show yet' forever."
-            echo "Set it in Amplify console -> Hosting -> Environment variables."
-            exit 1
-          fi
-        - npm --prefix web run build
-        - echo "--- build output ---"
-        - ls -la web/.next | head -15
-  artifacts:
-    baseDirectory: web/.next
-    files:
-      - '**/*'
-  cache:
-    paths:
-      - web/node_modules/**/*
-      - web/.next/cache/**/*
+applications:
+  - appRoot: web
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            - node --version
+            - pwd
+            # npm ci needs the committed package-lock.json; fall back if absent.
+            - npm ci || npm install
+        build:
+          commands:
+            - |
+              if [ -z "$NEXT_PUBLIC_API_URL" ]; then
+                echo "NEXT_PUBLIC_API_URL is not set. The dashboard would build in"
+                echo "local-file mode and show 'No run to show yet' forever."
+                echo "Set it in Amplify console -> Hosting -> Environment variables."
+                exit 1
+              fi
+            - npm run build
+      artifacts:
+        baseDirectory: .next
+        files:
+          - '**/*'
+      cache:
+        paths:
+          - node_modules/**/*
+          - .next/cache/**/*
