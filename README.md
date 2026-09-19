@@ -129,17 +129,58 @@ inference at the account level, so the backend is a runtime choice:
 | `MODEL_PROVIDER` | Credentials | Notes |
 |---|---|---|
 | `bedrock` | IAM | Default. `scripts/bedrock_enable.py --check` diagnoses access |
-| `gemini` | `GEMINI_API_KEY` | Free tier has a daily request cap |
+| `gemini` | `GEMINI_API_KEY` | Free tier has a daily cap *and* sheds load under demand |
 | `anthropic` | `ANTHROPIC_API_KEY` | |
-| `openai` | `OPENAI_API_KEY`, `OPENAI_BASE_URL` | Also covers Groq, OpenRouter, Together, Ollama |
-| `mock` | none | Deterministic rules, no network. **Development only** |
+| `openai` | `OPENAI_API_KEY` | |
+| `groq` | `GROQ_API_KEY` | Free, fast, OpenAI-compatible |
+| `openrouter` | `OPENROUTER_API_KEY` | |
+| `ollama` | none | Local, `OPENAI_BASE_URL` overridable |
+| `mock` | none | Deterministic rules, no network |
 
-All five return the same `ModelEdits`, so the agent loop never changes. Every
+They all return the same `ModelEdits`, so the agent loop never changes. Every
 run prints the active provider and model as its first line of output.
 
+**`MODEL_PROVIDER` takes a chain**, tried in order:
+
+```
+MODEL_PROVIDER=gemini,groq,mock
+```
+
+This exists because of a specific failure. A run died after clustering with
+`gemini failed after 5 attempts -- HTTP 503: This model is currently
+experiencing high demand`. That is not a rate limit and not a bug on our side;
+it is Google's free tier out of capacity, and no retry policy fixes it. The
+chain shares one time budget — three providers do not take three times as long —
+and each pass records which backend answered:
+
+```
+fix color-contrast [groq]: model proposed 6 edit(s), 6 applied, 0 rejected
+```
+
+That label is not decoration. With a fallback chain, "which model wrote these
+edits" stops being answerable from configuration, and a demo that quietly
+dropped to the deterministic rules while presenting itself as an LLM agent would
+be misrepresenting itself. **No number in our demo or eval table comes from mock
+mode** — the log is what proves it.
+
+The chain distinguishes two kinds of failure, because they deserve opposite
+treatment:
+
+| | example | behaviour |
+|---|---|---|
+| transient | 503 high demand, 429, timeout | retried with backoff, then the next provider |
+| fatal | 402 credits depleted, 401 bad key, 404 retired model | provider removed from the chain for the rest of the process |
+
+The second row came from a run that returned `gemini 402: Your prepayment
+credits are depleted`. That is a billing wall, and asking again on the next
+cluster buys nothing but a round trip — eight rules would have meant being told
+the same thing eight times. A cold start clears the list, which is the right
+granularity for "someone topped the account up".
+
 `mock` exists so the pipeline can be developed and the frontend built with no
-credentials at all. **No number in our demo or eval table comes from mock
-mode** — those all use a real model, and the run log records which.
+credentials at all. It covers `image-alt`, `label`, `link-name`, `button-name`,
+`color-contrast` and the simple attribute rules; anything else it defers
+honestly rather than guessing.
 
 Container gotcha: the Lambda AL2023 base image uses `dnf`, so
 `playwright install --with-deps` (which shells out to `apt`) fails. The
