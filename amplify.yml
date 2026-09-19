@@ -1,31 +1,30 @@
 # Amplify build spec.
 #
-# The Next.js app lives in web/, not at the repo root. This file cds into it
-# explicitly rather than relying on the console's "root directory" setting,
-# which is easy to leave unset -- the build then runs at the repo root, finds no
-# package.json, and fails at npm install.
+# The Next.js app lives in web/, not at the repo root.
 #
-# Because the commands cd, artifacts.baseDirectory is relative to the REPO
-# ROOT and must therefore say web/.next, not .next.
+# Note there is no `cd`. Amplify runs a phase's commands in one shell and the
+# working directory CARRIES OVER between phases, so a `cd web` in preBuild
+# leaves the build phase already inside web/ and a second `cd web` fails with
+# "No such file or directory". `npm --prefix` never changes directory, so it
+# behaves the same however Amplify chooses to sequence the phases.
+#
+# Because cwd stays at the repo root, artifacts.baseDirectory is web/.next.
 #
 # Still required in the console:
 #   Environment variables: NEXT_PUBLIC_API_URL = https://<id>.execute-api.<region>.amazonaws.com
 #   Platform must be WEB_COMPUTE (Next.js SSR) -- /api/page-html proxies
 #   artifacts at request time, so a static deploy cannot serve this app.
-#
-# NEXT_PUBLIC_* is inlined at BUILD time, so changing it needs a redeploy.
 version: 1
 frontend:
   phases:
     preBuild:
       commands:
         - node --version
-        - cd web
-        # npm ci needs a committed package-lock.json; fall back if it is absent.
-        - npm ci || npm install
+        - pwd
+        # npm ci needs a committed package-lock.json; fall back if absent.
+        - npm --prefix web ci || npm --prefix web install
     build:
       commands:
-        - cd web
         - |
           if [ -z "$NEXT_PUBLIC_API_URL" ]; then
             echo "NEXT_PUBLIC_API_URL is not set. The dashboard would build in"
@@ -33,9 +32,9 @@ frontend:
             echo "Set it in Amplify console -> Hosting -> Environment variables."
             exit 1
           fi
-        - npm run build
+        - npm --prefix web run build
         - echo "--- build output ---"
-        - ls -la .next | head -15
+        - ls -la web/.next | head -15
   artifacts:
     baseDirectory: web/.next
     files:

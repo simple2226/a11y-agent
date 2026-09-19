@@ -13,6 +13,11 @@ export interface AppliedEdit {
   op: EditOperation;
   args: Record<string, unknown>;
   rationale: string;
+  /** How many nodes this one edit matched. */
+  matched_nodes?: number;
+  /** The actual markup, captured by the applier as it changed each node. */
+  before_snippets?: string[];
+  after_snippets?: string[];
 }
 
 export interface DeferredItem {

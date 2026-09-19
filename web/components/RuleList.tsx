@@ -34,8 +34,15 @@ export default function RuleList({ rows, selectedRuleId, onSelect }: Props) {
               <span className="marker" data-outcome={row.outcome} aria-hidden="true">
                 {markerFor(row.outcome)}
               </span>
-              <span>
-                <span className="rule-id">{row.ruleId}</span>
+              <span className="rule-body">
+                <span className="rule-top">
+                  <span className="rule-id">{row.ruleId}</span>
+                  {row.impact ? (
+                    <span className="rule-impact" data-impact={row.impact}>
+                      {row.impact}
+                    </span>
+                  ) : null}
+                </span>
                 <span className="visually-hidden">. {labelFor(row.outcome)}.</span>
                 <span className="rule-help">{row.help}</span>
               </span>

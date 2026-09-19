@@ -5,6 +5,7 @@ import ChangeDetail from "@/components/ChangeDetail";
 import ComparisonFrames, { type ViewMode } from "@/components/ComparisonFrames";
 import RunStarter from "@/components/RunStarter";
 import RuleList from "@/components/RuleList";
+import VerdictBar from "@/components/VerdictBar";
 import {
   IS_REMOTE,
   fetchReport,
@@ -104,18 +105,9 @@ export default function Dashboard() {
 
         <RunStarter onStarted={setRunId} busy={waiting} />
 
-        {report ? (
-          <p className="verdict">
-            <span className="before">{report.score_before}</span>
-            <span className="arrow" aria-hidden="true">→</span>
-            <span className="after">{report.score_after}</span>
-            <span className="caption">
-              axe score · {report.accepted_edits.length} edits ·{" "}
-              {report.deferred_items.length} left for a person
-            </span>
-          </p>
-        ) : null}
       </header>
+
+      {report && !waiting ? <VerdictBar report={report} rows={rows} /> : null}
 
       {waiting ? (
         <main className="empty">
