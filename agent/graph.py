@@ -23,6 +23,7 @@ and LangGraph merges that in.
 
 from __future__ import annotations
 
+import json
 import logging
 import operator
 from typing import Annotated, TypedDict
@@ -30,7 +31,8 @@ from typing import Annotated, TypedDict
 from langgraph.graph import END, StateGraph
 
 from agent.applier import apply_edits
-from agent.bedrock_client import TokenUsage, request_edits
+from agent.bedrock_client import TokenUsage
+from agent.model_provider import request_edits
 from agent.clustering import ViolationCluster, build_clusters
 from agent.prompts import SYSTEM_PROMPT, build_fix_prompt, build_repair_prompt
 from audit.runner import audit_html
@@ -60,11 +62,18 @@ class RunState(TypedDict):
     repair_attempts: int
     last_rejection_feedback: str
     last_newly_introduced: list[str]
+    last_pass_was_empty: bool
+    cluster_start_html: str
+    cluster_start_edit_count: int
+    cluster_start_score: int
 
     accepted_edits: list[dict]
+    applied_signatures: list[str]
     deferred_items: list[dict]
     unfixed_rules: list[str]
+    deferred_rules: list[str]
     cluster_reports: list[dict]
+    last_rule_status: str
 
     score_before: int
     score_after: int
@@ -85,10 +94,17 @@ class StateUpdate(TypedDict, total=False):
     repair_attempts: int
     last_rejection_feedback: str
     last_newly_introduced: list[str]
+    last_pass_was_empty: bool
+    cluster_start_html: str
+    cluster_start_edit_count: int
+    cluster_start_score: int
     accepted_edits: list[dict]
+    applied_signatures: list[str]
     deferred_items: list[dict]
     unfixed_rules: list[str]
+    deferred_rules: list[str]
     cluster_reports: list[dict]
+    last_rule_status: str
     score_before: int
     score_after: int
     token_usage: TokenUsage
@@ -115,10 +131,17 @@ def initial_state(
         repair_attempts=0,
         last_rejection_feedback="",
         last_newly_introduced=[],
+        last_pass_was_empty=False,
+        cluster_start_html=original_html,
+        cluster_start_edit_count=0,
+        cluster_start_score=0,
         accepted_edits=[],
+        applied_signatures=[],
         deferred_items=[],
         unfixed_rules=[],
+        deferred_rules=[],
         cluster_reports=[],
+        last_rule_status="open",
         score_before=0,
         score_after=0,
         token_usage=TokenUsage(),
@@ -149,6 +172,18 @@ def node_cluster(state: RunState) -> StateUpdate:
     }
 
 
+def edit_signature(edit: dict) -> str:
+    """Identity of an edit, so a repair pass does not re-apply what already landed."""
+    return "|".join(
+        [
+            edit.get("violation_id", ""),
+            edit.get("selector", ""),
+            edit.get("op", ""),
+            json.dumps(edit.get("args", {}), sort_keys=True),
+        ]
+    )
+
+
 def _remaining_nodes_for_rule(html_text: str, rule_id: str) -> int:
     result = audit_html(html_text, take_screenshot=False)
     for violation in result.violations:
@@ -161,6 +196,16 @@ def node_generate_and_apply(state: RunState) -> StateUpdate:
     cluster = state["clusters"][state["cluster_index"]]
     is_repair = state["repair_attempts"] > 0
 
+    # Snapshot before touching this rule, so a cluster that ends up making the
+    # page worse can be undone rather than shipped.
+    snapshot: StateUpdate = {}
+    if not is_repair:
+        snapshot = {
+            "cluster_start_html": state["working_html"],
+            "cluster_start_edit_count": len(state["accepted_edits"]),
+            "cluster_start_score": state["score_after"],
+        }
+
     if is_repair:
         remaining = _remaining_nodes_for_rule(state["working_html"], cluster.rule_id)
         prompt = build_repair_prompt(
@@ -172,29 +217,95 @@ def node_generate_and_apply(state: RunState) -> StateUpdate:
     else:
         prompt = build_fix_prompt(cluster, state["page_title"], state["page_url"])
 
-    model_output = request_edits(SYSTEM_PROMPT, prompt)
+    model_output = request_edits(
+        SYSTEM_PROMPT,
+        prompt,
+        rule_id=cluster.rule_id,
+        nodes=cluster.sample_nodes,
+    )
 
     usage = state["token_usage"]
     usage.add(model_output.usage)
 
-    apply_result = apply_edits(state["working_html"], model_output.edits)
+    already_applied = set(state["applied_signatures"])
+    fresh_edits = [
+        edit for edit in model_output.edits if edit_signature(edit) not in already_applied
+    ]
+    duplicate_count = len(model_output.edits) - len(fresh_edits)
+
+    apply_result = apply_edits(state["working_html"], fresh_edits)
     pass_label = "repair" if is_repair else "fix"
 
+    known_deferred = {
+        (item.get("violation_id"), item.get("selector")) for item in state["deferred_items"]
+    }
+    fresh_deferred = [
+        item
+        for item in model_output.deferred
+        if (item.get("violation_id"), item.get("selector")) not in known_deferred
+    ]
+
+    duplicate_note = f", {duplicate_count} already applied" if duplicate_count else ""
+
     return {
+        **snapshot,
         "working_html": apply_result.html,
         "accepted_edits": state["accepted_edits"]
         + [applied.edit for applied in apply_result.applied],
-        "deferred_items": state["deferred_items"] + model_output.deferred,
+        "applied_signatures": state["applied_signatures"]
+        + [edit_signature(applied.edit) for applied in apply_result.applied],
+        "deferred_items": state["deferred_items"] + fresh_deferred,
         "last_rejection_feedback": apply_result.rejection_feedback(),
+        # "Made no progress" covers two cases that both mean another identical
+        # prompt is wasted money: the model returned nothing, or it returned
+        # only edits that had already landed.
+        "last_pass_was_empty": (
+            not apply_result.applied
+            and not fresh_deferred
+        ),
         "token_usage": usage,
         "log": [
             f"{pass_label} {cluster.rule_id}: "
             f"model proposed {len(model_output.edits)} edit(s), "
             f"{apply_result.applied_count} applied, "
             f"{len(apply_result.rejected)} rejected, "
-            f"{len(model_output.deferred)} deferred"
+            f"{len(fresh_deferred)} deferred{duplicate_note}"
         ],
     }
+
+
+def classify_rule_status(
+    rule_id: str,
+    violations: list[dict],
+    deferred_items: list[dict],
+) -> tuple[str, int]:
+    """resolved | deferred | open, plus how many nodes still fail.
+
+    'deferred' means every node still failing this rule is one the model
+    explicitly declined to guess at. That is the correct outcome for things like
+    alt text on a photograph, and it must not be retried as if it were a failure.
+    """
+    remaining = next(
+        (violation for violation in violations if violation["id"] == rule_id), None
+    )
+    if remaining is None:
+        return "resolved", 0
+
+    remaining_targets = {
+        node["target"][0]
+        for node in remaining.get("nodes", [])
+        if node.get("target")
+    }
+    deferred_targets = {
+        item.get("selector")
+        for item in deferred_items
+        if item.get("violation_id") == rule_id
+    }
+
+    node_count = remaining.get("totalNodes", len(remaining.get("nodes", [])))
+    if remaining_targets and remaining_targets.issubset(deferred_targets):
+        return "deferred", node_count
+    return "open", node_count
 
 
 def node_verify(state: RunState) -> StateUpdate:
@@ -202,15 +313,18 @@ def node_verify(state: RunState) -> StateUpdate:
     result = audit_html(state["working_html"], take_screenshot=False)
 
     delta = compare(state["original_violations"], result.violations)
-    rule_resolved = cluster.rule_id not in {violation["id"] for violation in result.violations}
+    rule_status, remaining_nodes = classify_rule_status(
+        cluster.rule_id, result.violations, state["deferred_items"]
+    )
     introduced_label = ", ".join(delta.introduced_rules) or "none"
 
     return {
         "final_violations": result.violations,
         "score_after": delta.score_after,
         "last_newly_introduced": delta.introduced_rules,
+        "last_rule_status": rule_status,
         "log": [
-            f"verify {cluster.rule_id}: resolved={rule_resolved} "
+            f"verify {cluster.rule_id}: {rule_status} ({remaining_nodes} node(s) left) "
             f"score={delta.score_before}->{delta.score_after} "
             f"introduced={introduced_label}"
         ],
@@ -218,20 +332,29 @@ def node_verify(state: RunState) -> StateUpdate:
 
 
 def route_after_verify(state: RunState) -> str:
-    cluster = state["clusters"][state["cluster_index"]]
-    current_rule_ids = {violation["id"] for violation in state["final_violations"]}
+    rule_status = state["last_rule_status"]
 
-    rule_resolved = cluster.rule_id not in current_rule_ids
-    introduced_regressions = bool(state["last_newly_introduced"])
-    had_rejections = bool(state["last_rejection_feedback"])
+    # A cluster "regressed" if it introduced a new rule OR lowered the score.
+    # The second case matters: making an existing rule fail on more nodes does
+    # not introduce a new rule id, but it still makes the page worse.
+    introduced_regressions = (
+        bool(state["last_newly_introduced"])
+        or state["score_after"] < state["cluster_start_score"]
+    )
 
-    if rule_resolved and not introduced_regressions:
+    if rule_status in {"resolved", "deferred"} and not introduced_regressions:
         return "next_cluster"
+
     if state["repair_attempts"] >= MAX_REPAIR_ATTEMPTS:
         return "give_up"
-    if introduced_regressions or had_rejections or not rule_resolved:
-        return "repair"
-    return "next_cluster"
+
+    # The pass changed nothing -- the model either returned nothing, or only
+    # repeated edits that had already landed. Another identical prompt returns
+    # the same thing; spending a call to prove it is waste.
+    if state["last_pass_was_empty"]:
+        return "give_up"
+
+    return "repair"
 
 
 def node_repair(state: RunState) -> StateUpdate:
@@ -239,41 +362,143 @@ def node_repair(state: RunState) -> StateUpdate:
 
 
 def node_give_up(state: RunState) -> StateUpdate:
+    """Stop working this rule. Revert if the attempt left the page worse.
+
+    A run must never be able to lower the score. If this cluster introduced a
+    violation that repair could not clear, every edit it made is rolled back and
+    the rule is reported as unfixed -- which is honest, and strictly better for
+    the user than shipping a page we damaged.
+    """
     cluster = state["clusters"][state["cluster_index"]]
-    return {
+    introduced = state["last_newly_introduced"]
+    score_dropped = state["score_after"] < state["cluster_start_score"]
+
+    update: StateUpdate = {
         "unfixed_rules": state["unfixed_rules"] + [cluster.rule_id],
-        "cluster_reports": state["cluster_reports"]
-        + [
-            {
-                "rule": cluster.rule_id,
-                "status": "unfixed",
-                "attempts": state["repair_attempts"] + 1,
-            }
-        ],
-        "log": [f"give_up {cluster.rule_id}: exhausted {MAX_REPAIR_ATTEMPTS} repair attempt(s)"],
     }
+
+    if introduced or score_dropped:
+        kept_edits = state["accepted_edits"][: state["cluster_start_edit_count"]]
+        reverted_count = len(state["accepted_edits"]) - len(kept_edits)
+
+        update.update(
+            {
+                "working_html": state["cluster_start_html"],
+                "accepted_edits": kept_edits,
+                "applied_signatures": [
+                    edit_signature(edit) for edit in kept_edits
+                ],
+                "last_newly_introduced": [],
+                "score_after": state["cluster_start_score"],
+                "cluster_reports": state["cluster_reports"]
+                + [
+                    {
+                        "rule": cluster.rule_id,
+                        "status": "reverted",
+                        "attempts": state["repair_attempts"] + 1,
+                        "introduced": introduced,
+                        "revertedEdits": reverted_count,
+                    }
+                ],
+                "log": [
+                    f"revert {cluster.rule_id}: "
+                    + (
+                        f"introduced {', '.join(introduced)}"
+                        if introduced
+                        else f"score fell {state['cluster_start_score']}->{state['score_after']}"
+                    )
+                    + f"; rolled back {reverted_count} edit(s)"
+                ],
+            }
+        )
+        return update
+
+    update.update(
+        {
+            "cluster_reports": state["cluster_reports"]
+            + [
+                {
+                    "rule": cluster.rule_id,
+                    "status": "unfixed",
+                    "attempts": state["repair_attempts"] + 1,
+                }
+            ],
+            "log": [
+                f"give_up {cluster.rule_id}: exhausted {MAX_REPAIR_ATTEMPTS} repair attempt(s)"
+            ],
+        }
+    )
+    return update
 
 
 def node_next_cluster(state: RunState) -> StateUpdate:
+    """Close out this rule and move on -- keeping its edits only if they helped.
+
+    A cluster that resolved its own rule but left the page scoring no better is
+    not a win, it is churn. Reverting it keeps the run monotonic: the score after
+    every cluster is greater than or equal to the score before it.
+    """
     cluster = state["clusters"][state["cluster_index"]]
     reports = state["cluster_reports"]
+
+    made_things_worse = state["score_after"] < state["cluster_start_score"]
+    if made_things_worse:
+        kept_edits = state["accepted_edits"][: state["cluster_start_edit_count"]]
+        reverted_count = len(state["accepted_edits"]) - len(kept_edits)
+        return {
+            "cluster_index": state["cluster_index"] + 1,
+            "repair_attempts": 0,
+            "last_rejection_feedback": "",
+            "last_newly_introduced": [],
+            "last_pass_was_empty": False,
+            "last_rule_status": "open",
+            "working_html": state["cluster_start_html"],
+            "accepted_edits": kept_edits,
+            "applied_signatures": [edit_signature(edit) for edit in kept_edits],
+            "score_after": state["cluster_start_score"],
+            "unfixed_rules": state["unfixed_rules"] + [cluster.rule_id],
+            "cluster_reports": reports
+            + [
+                {
+                    "rule": cluster.rule_id,
+                    "status": "reverted",
+                    "attempts": state["repair_attempts"] + 1,
+                    "reason": "score did not improve",
+                    "revertedEdits": reverted_count,
+                }
+            ],
+            "log": [
+                f"revert {cluster.rule_id}: score would have gone "
+                f"{state['cluster_start_score']} -> {state['score_after']}; "
+                f"rolled back {reverted_count} edit(s)"
+            ],
+        }
+
+    status = "deferred" if state["last_rule_status"] == "deferred" else "fixed"
 
     already_reported = any(report["rule"] == cluster.rule_id for report in reports)
     if not already_reported:
         reports = reports + [
             {
                 "rule": cluster.rule_id,
-                "status": "fixed",
+                "status": status,
                 "attempts": state["repair_attempts"] + 1,
             }
         ]
+
+    deferred_rules = state["deferred_rules"]
+    if status == "deferred" and cluster.rule_id not in deferred_rules:
+        deferred_rules = deferred_rules + [cluster.rule_id]
 
     return {
         "cluster_index": state["cluster_index"] + 1,
         "repair_attempts": 0,
         "last_rejection_feedback": "",
         "last_newly_introduced": [],
+        "last_pass_was_empty": False,
+        "last_rule_status": "open",
         "cluster_reports": reports,
+        "deferred_rules": deferred_rules,
     }
 
 

@@ -1,0 +1,42 @@
+# Agent image: Playwright + Chromium + axe-core + the LangGraph loop.
+#
+# Each pip install is its own layer on purpose. On a slow or flaky connection a
+# timeout only discards the layer that failed -- rerun `sam build` and the
+# packages that already landed are reused from cache.
+FROM public.ecr.aws/lambda/python:3.12
+
+# AL2023 uses dnf. `playwright install --with-deps` shells out to apt and fails
+# here, so the Chromium shared libraries are installed explicitly.
+RUN dnf install -y \
+      nss nspr atk at-spi2-atk at-spi2-core cups-libs \
+      libdrm libxkbcommon libXcomposite libXdamage libXext libXfixes libXrandr \
+      mesa-libgbm alsa-lib pango cairo libxshmfence \
+    && dnf clean all
+
+# Long timeout and many retries: the default 15s gives up on a slow link.
+ENV PIP_DEFAULT_TIMEOUT=180
+ENV PIP_RETRIES=10
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+ENV AXE_SCRIPT_PATH=/var/task/vendor/axe.min.js
+
+COPY requirements-core.txt requirements-agent.txt ${LAMBDA_TASK_ROOT}/
+
+# Layer 1: small wheels. Fast, almost always succeeds.
+RUN pip install --no-cache-dir -r ${LAMBDA_TASK_ROOT}/requirements-core.txt
+
+# Layer 2: langgraph and its dependency tree.
+RUN pip install --no-cache-dir -r ${LAMBDA_TASK_ROOT}/requirements-agent.txt
+
+# Layer 3: the 38 MB playwright wheel, alone. This is the one that times out.
+RUN pip install --no-cache-dir playwright==1.47.0
+
+# Layer 4: the ~170 MB Chromium download, also alone.
+RUN python -m playwright install chromium
+
+COPY vendor/   ${LAMBDA_TASK_ROOT}/vendor/
+COPY audit/    ${LAMBDA_TASK_ROOT}/audit/
+COPY agent/    ${LAMBDA_TASK_ROOT}/agent/
+COPY storage/  ${LAMBDA_TASK_ROOT}/storage/
+COPY scripts/  ${LAMBDA_TASK_ROOT}/scripts/
+
+CMD ["agent.handler.lambda_handler"]

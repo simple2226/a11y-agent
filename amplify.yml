@@ -1,0 +1,27 @@
+
+version: 1
+applications:
+  - appRoot: web
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            - npm ci || npm install
+        build:
+          commands:
+            - |
+              if [ -z "$NEXT_PUBLIC_API_URL" ]; then
+                echo "NEXT_PUBLIC_API_URL is not set -- the dashboard would build"
+                echo "in local-file mode and show 'No run to show yet' forever."
+                echo "Set it in Amplify console -> Hosting -> Environment variables."
+                exit 1
+              fi
+            - npm run build
+      artifacts:
+        baseDirectory: .next
+        files:
+          - '**/*'
+      cache:
+        paths:
+          - node_modules/**/*
+          - .next/cache/**/*

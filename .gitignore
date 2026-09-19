@@ -7,5 +7,12 @@ out/
 evals/results/
 web/node_modules/
 web/.next/
-.env
 .DS_Store
+
+# secrets and local deploy state -- never commit
+.env
+.env.local
+env.json
+infra/env.json
+samconfig.toml
+body.json

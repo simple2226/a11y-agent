@@ -1,0 +1,2 @@
+# Agent image only.
+langgraph==0.2.45

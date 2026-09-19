@@ -28,6 +28,24 @@ REQUEST_TIMEOUT_SECONDS = 20
 
 CSS_URL_PATTERN = re.compile(r"""url\(\s*(['"]?)([^'")]+)\1\s*\)""", re.IGNORECASE)
 
+CSS_IMPORT_PATTERN = re.compile(
+    r"""@import\s+(?:url\(\s*)?['"]?([^'")\s;]+)['"]?\s*\)?\s*;""", re.IGNORECASE
+)
+
+# A mirrored page is loaded from a file:// URL, which Chromium treats as an
+# opaque origin. Every stylesheet still sitting at https://origin/... is then
+# cross-origin and is simply not applied -- the page renders in Times New Roman
+# with no layout, and every accessibility score computed from it is fiction.
+#
+# So we fetch the stylesheets ourselves and inline them. After this the document
+# needs nothing from the origin in order to render correctly.
+# Drupal and WordPress sites routinely ship 20-40 separate stylesheets. A cap
+# below that silently leaves the theme CSS as a cross-origin <link>, which does
+# not apply -- the page renders unstyled and every score is fiction.
+MAX_INLINED_STYLESHEETS = 50
+MAX_STYLESHEET_BYTES = 2_000_000
+STYLESHEET_TIMEOUT_SECONDS = 10
+
 
 @dataclass
 class MirroredPage:
@@ -132,7 +150,90 @@ def _neutralise_form_actions(soup: BeautifulSoup) -> None:
         form_element["action"] = "javascript:void(0)"
 
 
-def mirror(url: str, neutralise_forms: bool = True) -> MirroredPage:
+def _fetch_stylesheet(
+    client: httpx.Client, sheet_url: str, referer: str, failures: list[str] | None = None
+) -> str | None:
+    try:
+        response = client.get(sheet_url, headers={"Referer": referer})
+    except httpx.HTTPError as error:
+        if failures is not None:
+            failures.append(f"{sheet_url} -> {type(error).__name__}")
+        return None
+
+    if response.status_code != 200:
+        if failures is not None:
+            failures.append(f"{sheet_url} -> HTTP {response.status_code}")
+        return None
+    if len(response.content) > MAX_STYLESHEET_BYTES:
+        if failures is not None:
+            failures.append(f"{sheet_url} -> too large ({len(response.content)} bytes)")
+        return None
+    return response.text
+
+
+def _inline_stylesheets(soup: BeautifulSoup, base_url: str, notes: list[str]) -> None:
+    """Replace every <link rel=stylesheet> with a <style> holding its content."""
+    link_tags = [
+        tag
+        for tag in soup.find_all("link")
+        if "stylesheet" in " ".join(tag.get("rel") or []).lower() and tag.get("href")
+    ]
+    if not link_tags:
+        return
+
+    inlined_count = 0
+    inlined_bytes = 0
+    failures: list[str] = []
+
+    with httpx.Client(
+        follow_redirects=True,
+        timeout=STYLESHEET_TIMEOUT_SECONDS,
+        headers={"User-Agent": USER_AGENT, "Accept": "text/css,*/*;q=0.1"},
+    ) as client:
+        for link_tag in link_tags[:MAX_INLINED_STYLESHEETS]:
+            sheet_url = urljoin(base_url, link_tag["href"])
+            css_text = _fetch_stylesheet(client, sheet_url, base_url, failures)
+
+            if css_text is None:
+                link_tag.decompose()
+                continue
+
+            # Resolve one level of @import, then absolutise every url().
+            for import_target in CSS_IMPORT_PATTERN.findall(css_text):
+                import_url = urljoin(sheet_url, import_target)
+                imported = _fetch_stylesheet(client, import_url, base_url)
+                if imported:
+                    css_text = _rewrite_css_urls(imported, import_url) + "\n" + css_text
+            css_text = CSS_IMPORT_PATTERN.sub("", css_text)
+            css_text = _rewrite_css_urls(css_text, sheet_url)
+
+            style_tag = soup.new_tag("style")
+            style_tag.string = css_text
+            style_tag["data-a11y-agent-inlined-from"] = sheet_url
+            link_tag.replace_with(style_tag)
+            inlined_count += 1
+            inlined_bytes += len(css_text)
+
+    notes.append(
+        f"inlined {inlined_count}/{len(link_tags)} stylesheet(s), "
+        f"{inlined_bytes} bytes of CSS"
+    )
+    for failure in failures[:6]:
+        notes.append(f"  stylesheet failed: {failure}")
+    if len(failures) > 6:
+        notes.append(f"  ...and {len(failures) - 6} more stylesheet failures")
+    if len(link_tags) > MAX_INLINED_STYLESHEETS:
+        notes.append(
+            f"NOT INLINED: {len(link_tags) - MAX_INLINED_STYLESHEETS} stylesheet(s) "
+            f"over the cap of {MAX_INLINED_STYLESHEETS} -- page may render unstyled"
+        )
+
+
+def mirror(
+    url: str,
+    neutralise_forms: bool = True,
+    inline_css: bool = True,
+) -> MirroredPage:
     html_text, status_code, final_url = fetch_page(url)
     soup = BeautifulSoup(html_text, "lxml")
     notes: list[str] = []
@@ -142,6 +243,9 @@ def mirror(url: str, neutralise_forms: bool = True) -> MirroredPage:
         notes.append(f"removed {removed_csp} CSP meta tag(s)")
 
     _ensure_base_tag(soup, final_url)
+
+    if inline_css:
+        _inline_stylesheets(soup, final_url, notes)
 
     rewritten_srcset = _rewrite_srcset_attributes(soup, final_url)
     if rewritten_srcset:

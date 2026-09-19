@@ -5,14 +5,32 @@ Description: Agentic accessibility remediation pipeline
 Parameters:
   BedrockModelId:
     Type: String
-    Default: anthropic.claude-sonnet-4-5-20250929-v1:0
+    Default: us.amazon.nova-pro-v1:0
+    Description: >-
+      Only used when ModelProvider is bedrock. Nova needs no provider usage form.
+      Anthropic ids on Bedrock require a one-time form and an inference profile
+      prefix (global. or us.); run scripts/check_bedrock.py to see what this
+      account can call.
   BedrockRegion:
     Type: String
     Default: us-east-1
+  ModelProvider:
+    Type: String
+    Default: bedrock
+    AllowedValues: [bedrock, gemini, anthropic, openai, mock]
+    Description: Which model backend the agent calls.
+  GeminiApiKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: Only needed when ModelProvider is gemini. Google AI Studio keys start with AIza.
+  GeminiModel:
+    Type: String
+    Default: gemini-2.5-flash
 
 Globals:
   Function:
-    Timeout: 300
+    Timeout: 900
     MemorySize: 3008
     Environment:
       Variables:
@@ -21,6 +39,9 @@ Globals:
         BEDROCK_MODEL_ID: !Ref BedrockModelId
         BEDROCK_REGION: !Ref BedrockRegion
         AXE_SCRIPT_PATH: /var/task/vendor/axe.min.js
+        MODEL_PROVIDER: !Ref ModelProvider
+        GEMINI_API_KEY: !Ref GeminiApiKey
+        GEMINI_MODEL: !Ref GeminiModel
 
 Resources:
 
@@ -66,7 +87,7 @@ Resources:
   AgentFunction:
     Type: AWS::Serverless::Function
     Metadata:
-      Dockerfile: Dockerfile
+      Dockerfile: infra/Dockerfile.agent
       DockerContext: ../
       DockerTag: agent
     Properties:
@@ -88,7 +109,7 @@ Resources:
   ApiFunction:
     Type: AWS::Serverless::Function
     Metadata:
-      Dockerfile: Dockerfile
+      Dockerfile: infra/Dockerfile.api
       DockerContext: ../
       DockerTag: api
     Properties:
@@ -140,9 +161,17 @@ Resources:
                 RunAgent:
                   Type: Task
                   Resource: !GetAtt AgentFunction.Arn
+                  TimeoutSeconds: 900
                   Retry:
-                    - ErrorEquals: [States.TaskFailed, Lambda.ServiceException]
-                      IntervalSeconds: 5
+                    # Infrastructure only. An application error is retried in
+                    # place (model calls, audits), so repeating the whole
+                    # invocation just redoes the mirror and every audit.
+                    - ErrorEquals:
+                        - Lambda.ServiceException
+                        - Lambda.AWSLambdaException
+                        - Lambda.SdkClientException
+                        - Lambda.TooManyRequestsException
+                      IntervalSeconds: 10
                       MaxAttempts: 2
                       BackoffRate: 2
                   Catch:

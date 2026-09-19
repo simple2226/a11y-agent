@@ -1,0 +1,16 @@
+﻿# API image: FastAPI behind Mangum. No Playwright, no Chromium, no dnf packages.
+# Builds in well under a minute even on a slow link.
+FROM public.ecr.aws/lambda/python:3.12
+
+ENV PIP_DEFAULT_TIMEOUT=180
+ENV PIP_RETRIES=10
+
+COPY requirements-core.txt requirements-api.txt ${LAMBDA_TASK_ROOT}/
+
+RUN pip install --no-cache-dir -r ${LAMBDA_TASK_ROOT}/requirements-core.txt
+RUN pip install --no-cache-dir -r ${LAMBDA_TASK_ROOT}/requirements-api.txt
+
+COPY api/      ${LAMBDA_TASK_ROOT}/api/
+COPY storage/  ${LAMBDA_TASK_ROOT}/storage/
+
+CMD ["api.handler.lambda_handler"]
