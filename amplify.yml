@@ -1,21 +1,23 @@
 # Amplify build spec -- Next.js SSR app in a subdirectory.
 #
-# The `applications:` / `appRoot:` (monorepo) form is REQUIRED here, not a
-# style choice. Amplify's Next.js adapter is what writes deploy-manifest.json,
-# and it only runs when Amplify knows where the Next.js app lives. Build the
-# app with `cd` or `npm --prefix` from a plain spec and the build succeeds but
-# the deploy fails with:
+# appRoot tells Amplify the app lives in web/, so every path below is relative
+# to web/ (hence .amplify-hosting, not web/.amplify-hosting). It needs a
+# matching environment variable or Amplify ignores it:
 #
-#   CustomerError: Failed to find the deploy-manifest.json file in the build output
-#
-# Because appRoot is web, every path below is relative to web/ -- so
-# baseDirectory is .next, NOT web/.next.
-#
-# This form also needs a matching environment variable, or Amplify ignores it:
 #   AMPLIFY_MONOREPO_APP_ROOT = web
 #
-# And the app platform must be WEB_COMPUTE. /api/page-html proxies artifacts at
+# We build the deploy bundle ourselves rather than relying on Amplify's
+# built-in Next.js adapter. That adapter writes deploy-manifest.json, but it
+# only runs when Amplify's own framework detection fires, which it does not do
+# reliably for an app in a subdirectory -- the build then succeeds and the
+# deploy fails with "Failed to find the deploy-manifest.json file". The npm
+# build script chains scripts/build-amplify-bundle.mjs, which emits
+# .amplify-hosting/ with the manifest, the compute bundle and the static root.
+#
+# The app platform must be WEB_COMPUTE: /api/page-html proxies artifacts at
 # request time, so a static deploy cannot serve this app.
+#
+# NEXT_PUBLIC_* is inlined at BUILD time, so changing it needs a redeploy.
 version: 1
 applications:
   - appRoot: web
@@ -24,8 +26,6 @@ applications:
         preBuild:
           commands:
             - node --version
-            - pwd
-            # npm ci needs the committed package-lock.json; fall back if absent.
             - npm ci || npm install
         build:
           commands:
@@ -36,9 +36,12 @@ applications:
                 echo "Set it in Amplify console -> Hosting -> Environment variables."
                 exit 1
               fi
+            # next build, then scripts/build-amplify-bundle.mjs
             - npm run build
+            - echo "--- deploy bundle ---"
+            - cat .amplify-hosting/deploy-manifest.json
       artifacts:
-        baseDirectory: .next
+        baseDirectory: .amplify-hosting
         files:
           - '**/*'
       cache:
