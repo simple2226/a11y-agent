@@ -1,35 +1,40 @@
-# Amplify build spec for the dashboard.
+# Amplify build spec.
 #
-# The Next.js app lives in web/, not at the repo root, so appRoot points there.
-# In the Amplify console set the app's root directory to "web" as well, and add
-# NEXT_PUBLIC_API_URL as an environment variable pointing at the deployed API:
-#   NEXT_PUBLIC_API_URL = https://<id>.execute-api.us-east-1.amazonaws.com
+# Plain (non-monorepo) format on purpose: the `applications:`/`appRoot:` form
+# needs AMPLIFY_MONOREPO_APP_ROOT to be set too, and the two disagreeing is a
+# common cause of a build that reports success but serves nothing.
 #
-# NEXT_PUBLIC_* values are inlined at BUILD time, not read at runtime. Changing
-# the variable therefore requires a redeploy, not just a restart.
+# Console setup that goes with this file:
+#   Hosting -> Build settings -> Build image settings -> Root directory: web
+#   Hosting -> Environment variables:
+#     NEXT_PUBLIC_API_URL = https://<id>.execute-api.<region>.amazonaws.com
+#   App settings -> platform must be WEB_COMPUTE (Next.js SSR), because the
+#     dashboard's /api/page-html route proxies artifacts at request time.
+#
+# NEXT_PUBLIC_* is inlined at BUILD time, so changing it needs a redeploy.
 version: 1
-applications:
-  - appRoot: web
-    frontend:
-      phases:
-        preBuild:
-          commands:
-            - npm ci || npm install
-        build:
-          commands:
-            - |
-              if [ -z "$NEXT_PUBLIC_API_URL" ]; then
-                echo "NEXT_PUBLIC_API_URL is not set -- the dashboard would build"
-                echo "in local-file mode and show 'No run to show yet' forever."
-                echo "Set it in Amplify console -> Hosting -> Environment variables."
-                exit 1
-              fi
-            - npm run build
-      artifacts:
-        baseDirectory: .next
-        files:
-          - '**/*'
-      cache:
-        paths:
-          - node_modules/**/*
-          - .next/cache/**/*
+frontend:
+  phases:
+    preBuild:
+      commands:
+        - node --version
+        - npm ci || npm install
+    build:
+      commands:
+        - |
+          if [ -z "$NEXT_PUBLIC_API_URL" ]; then
+            echo "NEXT_PUBLIC_API_URL is not set. The dashboard would build in"
+            echo "local-file mode and show 'No run to show yet' forever."
+            exit 1
+          fi
+        - npm run build
+        - echo "--- build output ---"
+        - ls -la .next | head -20
+  artifacts:
+    baseDirectory: .next
+    files:
+      - '**/*'
+  cache:
+    paths:
+      - node_modules/**/*
+      - .next/cache/**/*
