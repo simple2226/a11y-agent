@@ -56,7 +56,31 @@ def lambda_handler(event: dict, context) -> dict:
     )
 
     graph = build_graph()
-    final_state = graph.invoke(
+
+    # Stream rather than invoke, so the dashboard has something to show while a
+    # multi-minute run is in flight. Each node's log line is written straight to
+    # DynamoDB; the poller picks it up on its next pass. Without this the page
+    # row is only written once at the very end and the UI can do nothing but
+    # say "0 of 1 done" for several minutes.
+    final_state: dict = {}
+    progress_log: list[str] = []
+
+    def record_progress(phase: str, done: int, total: int) -> None:
+        dynamo_store.update_page_progress(
+            run_id,
+            page_id,
+            {
+                "phase": phase,
+                "clustersDone": done,
+                "clustersTotal": total,
+                "log": progress_log[-40:],
+                "updatedAt": int(time.time()),
+            },
+        )
+
+    record_progress("auditing the original page", 0, 0)
+
+    for update in graph.stream(
         initial_state(
             run_id=run_id,
             page_url=mirrored.final_url,
@@ -64,7 +88,21 @@ def lambda_handler(event: dict, context) -> dict:
             original_html=mirrored.html,
         ),
         config={"recursion_limit": 100},
-    )
+        stream_mode="values",
+    ):
+        final_state = update
+
+        new_lines = update.get("log", [])[len(progress_log):]
+        if new_lines:
+            progress_log.extend(new_lines)
+
+        clusters = update.get("clusters") or []
+        done = min(update.get("cluster_index", 0), len(clusters))
+        phase = progress_log[-1] if progress_log else "starting"
+
+        if new_lines:
+            logger.info("progress: %s", phase)
+            record_progress(phase, done, len(clusters))
 
     patched_key = s3_store.put_html(run_id, page_id, "patched", final_state["working_html"])
     delta = compare(final_state["original_violations"], final_state["final_violations"])

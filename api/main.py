@@ -86,6 +86,8 @@ def get_run(run_id: str) -> dict:
                 "status": page.get("status"),
                 "scoreBefore": page.get("scoreBefore"),
                 "scoreAfter": page.get("scoreAfter"),
+                # Live progress while the agent is still working.
+                "progress": page.get("progress"),
             }
             for page in pages
         ],

@@ -23,10 +23,10 @@ Parameters:
     Type: String
     Default: ""
     NoEcho: true
-    Description: Only needed when ModelProvider is gemini. Google AI Studio keys start with AIza.
+    Description: Only needed when ModelProvider is gemini. A Google AI Studio key.
   GeminiModel:
     Type: String
-    Default: gemini-2.5-flash
+    Default: gemini-flash-latest
 
 Globals:
   Function:

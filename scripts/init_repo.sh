@@ -8,8 +8,20 @@ set -euo pipefail
 
 echo "scanning for credentials..."
 
-# Google AI Studio keys, AWS access key ids, and generic long secrets.
-PATTERNS='AIza[0-9A-Za-z_\-]{30,}|AKIA[0-9A-Z]{16}|aws_secret_access_key|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+# Google API keys come in more than one shape -- AIza... and AQ.... both exist,
+# and a scanner that only knows one is worse than none, because it reports
+# "clean" on a repo that is about to leak a key.
+PATTERNS='AIza[0-9A-Za-z_\-]{30,}'
+PATTERNS="$PATTERNS|AQ\.[A-Za-z0-9_\-]{30,}"          # Google, newer format
+PATTERNS="$PATTERNS|AKIA[0-9A-Z]{16}"                  # AWS access key id
+PATTERNS="$PATTERNS|ASIA[0-9A-Z]{16}"                  # AWS temporary key id
+PATTERNS="$PATTERNS|sk-ant-[A-Za-z0-9_\-]{20,}"        # Anthropic
+PATTERNS="$PATTERNS|sk-proj-[A-Za-z0-9_\-]{20,}"       # OpenAI project
+PATTERNS="$PATTERNS|sk-[A-Za-z0-9]{32,}"                # OpenAI legacy
+PATTERNS="$PATTERNS|gsk_[A-Za-z0-9]{40,}"               # Groq
+PATTERNS="$PATTERNS|ghp_[A-Za-z0-9]{36}"                # GitHub PAT
+PATTERNS="$PATTERNS|aws_secret_access_key"
+PATTERNS="$PATTERNS|-----BEGIN [A-Z ]*PRIVATE KEY-----"
 
 FOUND=$(grep -rIEn "$PATTERNS" . \
   --exclude-dir=.git \

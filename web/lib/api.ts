@@ -12,6 +12,14 @@ import type { Report } from "./types";
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "";
 export const IS_REMOTE = API_BASE.length > 0;
 
+export interface RunProgress {
+  phase: string;
+  clustersDone: number;
+  clustersTotal: number;
+  log: string[];
+  updatedAt: number;
+}
+
 export interface PageSummary {
   pageId: string;
   url: string;
@@ -19,6 +27,8 @@ export interface PageSummary {
   status: string;
   scoreBefore: number | null;
   scoreAfter: number | null;
+  /** Written by the agent Lambda after every graph node while a run is live. */
+  progress?: RunProgress | null;
 }
 
 export interface RunSummary {

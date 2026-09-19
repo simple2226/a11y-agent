@@ -19,10 +19,34 @@ from pathlib import Path
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import ViewportSize, sync_playwright
 
-AXE_SCRIPT_PATH = os.environ.get(
-    "AXE_SCRIPT_PATH",
-    str(Path(__file__).resolve().parent.parent / "vendor" / "axe.min.js"),
-)
+# Resolved as a Path so the value is unambiguous wherever it came from -- an
+# env var (a string) in the container, or the vendored copy next to this file
+# during local runs. Playwright's add_script_tag has accepted both str and Path
+# across versions, so the call site passes str(...) explicitly rather than
+# depending on which one is installed.
+AXE_SCRIPT_PATH = Path(
+    os.environ.get(
+        "AXE_SCRIPT_PATH",
+        Path(__file__).resolve().parent.parent / "vendor" / "axe.min.js",
+    )
+).resolve()
+
+
+def axe_script_path() -> Path:
+    """The axe-core bundle, or a clear error naming where we looked.
+
+    Without this the failure is a Playwright error about a script tag, several
+    frames from the actual problem: vendor/ not copied into the image, or
+    AXE_SCRIPT_PATH pointing somewhere that does not exist.
+    """
+    if not AXE_SCRIPT_PATH.is_file():
+        raise FileNotFoundError(
+            f"axe-core not found at {AXE_SCRIPT_PATH}.\n"
+            f"Set AXE_SCRIPT_PATH, or restore the vendored copy:\n"
+            f"  npm pack axe-core@4.10.2 && tar xzf axe-core-4.10.2.tgz\n"
+            f"  cp package/axe.min.js vendor/axe.min.js"
+        )
+    return AXE_SCRIPT_PATH
 
 # Flags that are safe everywhere.
 BASE_CHROMIUM_ARGS = [
@@ -186,7 +210,9 @@ def _trim_violation(violation: dict, max_nodes: int) -> dict:
 
 
 def _run_axe_on_page(page, take_screenshot: bool, max_nodes_per_violation: int) -> AuditResult:
-    page.add_script_tag(path=AXE_SCRIPT_PATH)
+    # str(): add_script_tag's accepted types have varied across Playwright
+    # versions, and a str works in all of them.
+    page.add_script_tag(path=str(axe_script_path()))
     raw = page.evaluate(AXE_RUN_SCRIPT, AXE_RUN_OPTIONS)
 
     screenshot_png = _try_screenshot(page) if take_screenshot else None

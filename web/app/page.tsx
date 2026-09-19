@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ChangeDetail from "@/components/ChangeDetail";
 import ComparisonFrames, { type ViewMode } from "@/components/ComparisonFrames";
+import RunProgressPanel from "@/components/RunProgressPanel";
 import RunStarter from "@/components/RunStarter";
 import RuleList from "@/components/RuleList";
 import VerdictBar from "@/components/VerdictBar";
@@ -18,7 +19,26 @@ import { buildRuleRows } from "@/lib/rules";
 const POLL_INTERVAL_MS = 2500;
 
 export default function Dashboard() {
-  const [runId, setRunId] = useState<string | null>(null);
+  const [runId, setRunIdState] = useState<string | null>(null);
+
+  const setRunId = useCallback((id: string | null) => {
+    setRunIdState(id);
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (id) {
+      url.searchParams.set("run", id);
+    } else {
+      url.searchParams.delete("run");
+    }
+    window.history.replaceState(null, "", url.toString());
+  }, []);
+
+  // Pick a run back up after a reload, or from a shared link.
+  useEffect(() => {
+    if (!IS_REMOTE) return;
+    const existing = new URLSearchParams(window.location.search).get("run");
+    if (existing) setRunIdState(existing);
+  }, []);
   const [run, setRun] = useState<RunSummary | null>(null);
   const [report, setReport] = useState<ReportWithArtifacts | null>(null);
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
@@ -109,20 +129,7 @@ export default function Dashboard() {
 
       {report && !waiting ? <VerdictBar report={report} rows={rows} /> : null}
 
-      {waiting ? (
-        <main className="empty">
-          <p>
-            Auditing{run?.urls?.[0] ? ` ${run.urls[0]}` : ""}… this takes a couple of
-            minutes. Chromium renders the page, axe finds the violations, the agent
-            fixes them, then it all runs again to check the work.
-          </p>
-          {run ? (
-            <p>
-              {run.aggregate.pagesDone} of {run.aggregate.pagesTotal} page(s) done.
-            </p>
-          ) : null}
-        </main>
-      ) : null}
+      {waiting ? <RunProgressPanel run={run} url={run?.urls?.[0] ?? null} /> : null}
 
       {report && !waiting ? (
         <div className="workspace">

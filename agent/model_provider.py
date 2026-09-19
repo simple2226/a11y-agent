@@ -36,6 +36,8 @@ REQUEST_TIMEOUT_SECONDS = 180
 # and the mirror plus every audit runs again from scratch -- minutes of work
 # thrown away for a blip that a two second wait would have cleared.
 MAX_ATTEMPTS = 5
+# 404 is deliberately absent: a retired model name never comes back, and
+# retrying it just burns the backoff budget before reporting the real problem.
 RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 BASE_BACKOFF_SECONDS = 2.0
 MAX_BACKOFF_SECONDS = 30.0
@@ -58,6 +60,31 @@ def _backoff_seconds(attempt: int, response: httpx.Response | None = None) -> fl
     return min(exponential, MAX_BACKOFF_SECONDS) * (0.5 + random.random() * 0.5)
 
 
+def _explain_http_failure(response: httpx.Response) -> str:
+    """Say what to do about it, not just what the server said."""
+    body = response.text[:400]
+    lowered = body.lower()
+
+    if "no longer available" in lowered or "not found for api version" in lowered:
+        return (
+            f"the model name is retired or wrong -- set GEMINI_MODEL (or the "
+            f"provider's model variable) to a current one. The API's own message "
+            f"usually names the replacement:\n  {body}"
+        )
+    if "api key not valid" in lowered or "api_key_invalid" in lowered:
+        return (
+            "the API key was rejected. Confirm it is set on this environment and "
+            "not expired -- `python scripts/check_model.py` lists what it can call."
+        )
+    if "exceeded your current quota" in lowered:
+        return (
+            "the account's quota is exhausted, which no amount of retrying "
+            "clears. Wait for the reset, use a different key, or switch model.\n"
+            f"  {body}"
+        )
+    return body
+
+
 def _post_with_retry(provider: str, **request_kwargs) -> httpx.Response:
     """POST, retrying transient failures. Returns a 2xx response or raises."""
     last_detail = "no attempt made"
@@ -75,7 +102,10 @@ def _post_with_retry(provider: str, **request_kwargs) -> httpx.Response:
             last_detail = f"HTTP {response.status_code}: {detail}"
 
             if response.status_code not in RETRYABLE_STATUS_CODES:
-                raise ProviderError(f"{provider} {response.status_code}: {response.text[:400]}")
+                raise ProviderError(
+                    f"{provider} {response.status_code}: "
+                    f"{_explain_http_failure(response)}"
+                )
 
             if attempt + 1 < MAX_ATTEMPTS:
                 delay = _backoff_seconds(attempt, response)
@@ -120,7 +150,7 @@ def active_model_label() -> str:
     model = {
         "bedrock": os.environ.get("BEDROCK_MODEL_ID", "us.amazon.nova-pro-v1:0"),
         "anthropic": os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929"),
-        "gemini": os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
+        "gemini": os.environ.get("GEMINI_MODEL", GEMINI_DEFAULT_MODEL),
         "mock": "deterministic rules, no network",
     }.get(provider, os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
     return f"{provider} / {model}"
@@ -268,6 +298,12 @@ def _unpack_gemini_args(payload: dict) -> dict:
     return payload
 
 
+# An alias, deliberately, not a pinned version. Google retires specific names
+# without notice -- "no longer available" arrives as a 404 mid-run, and we have
+# been bitten by it twice. The alias tracks whatever is current.
+# Pin a version via GEMINI_MODEL when reproducibility matters more than uptime.
+GEMINI_DEFAULT_MODEL = "gemini-flash-latest"
+
 GEMINI_MAX_OUTPUT_TOKENS = int(os.environ.get("GEMINI_MAX_OUTPUT_TOKENS", "16384"))
 GEMINI_THINKING_BUDGET = int(os.environ.get("GEMINI_THINKING_BUDGET", "0"))
 
@@ -307,7 +343,7 @@ def _describe_gemini_failure(body: dict) -> str:
 
 def _request_gemini(system_prompt: str, user_prompt: str) -> ModelEdits:
     api_key = _require_env("GEMINI_API_KEY")
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    model = os.environ.get("GEMINI_MODEL", GEMINI_DEFAULT_MODEL)
 
     response = _post_with_retry(
         "gemini",

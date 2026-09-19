@@ -100,6 +100,19 @@ def put_violation(run_id: str, page_id: str, rule_id: str, attributes: dict) -> 
     )
 
 
+def update_page_progress(run_id: str, page_id: str, progress: dict) -> None:
+    """Merge live progress into an existing page row.
+
+    update_item rather than put_item: a run in flight must not clobber the url,
+    title and artifact keys that were written when the page started.
+    """
+    _table().update_item(
+        Key={"pk": f"RUN#{run_id}", "sk": f"PAGE#{page_id}"},
+        UpdateExpression="SET progress = :progress",
+        ExpressionAttributeValues={":progress": _to_dynamo(progress)},
+    )
+
+
 def get_run(run_id: str) -> dict | None:
     response = _table().get_item(Key={"pk": f"RUN#{run_id}", "sk": "META"})
     item = response.get("Item")

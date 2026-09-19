@@ -3,7 +3,7 @@
 # Model configuration is passed as CloudFormation parameters so it survives
 # every redeploy. Set these in your shell before running:
 #   $env:MODEL_PROVIDER = "gemini"
-#   $env:GEMINI_API_KEY = "AIza..."
+#   $env:GEMINI_API_KEY = "<your Google AI Studio key>"
 # The key is never written to a file and never reaches the repo.
 
 $ErrorActionPreference = "Stop"
@@ -12,7 +12,7 @@ Set-Location $PSScriptRoot
 $Region = if ($env:AWS_REGION) { $env:AWS_REGION } else { "us-east-1" }
 $ModelProvider = if ($env:MODEL_PROVIDER) { $env:MODEL_PROVIDER } else { "bedrock" }
 $GeminiApiKey = if ($env:GEMINI_API_KEY) { $env:GEMINI_API_KEY } else { "" }
-$GeminiModel = if ($env:GEMINI_MODEL) { $env:GEMINI_MODEL } else { "gemini-2.5-flash" }
+$GeminiModel = if ($env:GEMINI_MODEL) { $env:GEMINI_MODEL } else { "gemini-flash-latest" }
 
 # Guard against the mistake that costs 40 minutes: both functions pointing at
 # the same Dockerfile means the API image ships without api/ in it.
@@ -28,9 +28,6 @@ Write-Host "Dockerfiles OK: $dockerfiles"
 
 if ($ModelProvider -eq "gemini" -and -not $GeminiApiKey) {
     Write-Error "MODEL_PROVIDER is gemini but GEMINI_API_KEY is not set in this shell."
-}
-if ($GeminiApiKey -and -not $GeminiApiKey.StartsWith("AIza")) {
-    Write-Warning "GEMINI_API_KEY does not start with 'AIza'. Google AI Studio keys do; this one may be the wrong credential type."
 }
 Write-Host "Model provider: $ModelProvider`n"
 
