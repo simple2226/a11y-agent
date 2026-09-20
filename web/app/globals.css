@@ -220,6 +220,11 @@ button { font: inherit; color: inherit; }
   font-variant-numeric: tabular-nums;
   line-height: 1.2;
 }
+.verdict-stat-of {
+  font-size: 0.8125rem;
+  font-weight: 400;
+  color: var(--ink-soft);
+}
 .verdict-stat[data-tone="pass"] dd { color: var(--pass); }
 .verdict-stat[data-tone="fail"] dd { color: var(--fail); }
 .verdict-stat[data-tone="defer"] dd { color: var(--defer); }

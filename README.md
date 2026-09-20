@@ -348,6 +348,47 @@ opposing ones, per rule.
   `AWS_LAMBDA_FUNCTION_NAME` at runtime. `scripts/smoke_image.py` verifies all
   of this inside the built image, before a 2 GB push to ECR.
 
+### The repair loop was reading its own finished work
+
+Two university home pages came back with the score unchanged — not worse, just
+flat — while the log showed twenty edits applied. The work was real; the loop
+could not finish it.
+
+Three limits multiplied together:
+
+- **The model saw 12 of N failing nodes.** A rule failing on forty could never
+  be cleared in one pass.
+- **Repair passes were handed the *original* sample.** `_remaining_nodes_for_rule`
+  returned a count and nothing else, so the repair prompt was rebuilt from the
+  same twelve nodes the first pass had already fixed. The de-duplicator then
+  dropped every edit as already-applied, `last_pass_was_empty` fired, and the
+  rule was abandoned. Both repair attempts were blind.
+- **The score caps each rule at three nodes.** Going from forty failing nodes to
+  twenty changes the penalty by exactly zero.
+
+Reproduced and fixed, with the before and after from the same fixture — one
+rule, forty nodes, a stand-in model that fixes only what it is shown:
+
+```
+before:  fix ... 20 applied  ->  repair ... 0 applied, 20 already applied
+         give_up ... 79 -> 79   (40 nodes -> 20)
+
+after:   fix ... 20 applied  ->  repair ... 20 applied
+         resolved            ...  79 -> 100  (40 nodes -> 0)
+```
+
+The fix is that every pass now re-audits and prompts with the nodes that are
+*still* failing, the repair budget extends while the failing count is falling,
+and the prompt tells the model when per-node selectors cannot possibly finish —
+pushing it toward one selector that covers the whole family. `MAX_MATCHES_PER_EDIT`
+went from 40 to 150, because the old cap rejected exactly the grouped selectors
+the new guidance asks for.
+
+The scoring cap is a real limitation and we left it alone rather than tune the
+formula to flatter ourselves. Instead the dashboard now reports **elements
+repaired** next to the score, so a run that fixes thirty of forty nodes says so
+even when the number above it has not moved.
+
 ### A hang is a worse failure than an error
 
 A run stopped dead after the clustering step and stayed there. The dashboard
@@ -399,7 +440,6 @@ cd web && npm install && npm run dev
 Reads `out/report.json` from the CLI run by default, so it works with no AWS at
 all. Point `REPORT_DIR` elsewhere, or set `NEXT_PUBLIC_API_URL` to read the
 deployed API instead.
-
 
 Design notes, since Best UI is judged:
 
