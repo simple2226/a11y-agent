@@ -95,7 +95,14 @@ export default function ComparisonFrames({
               }}
               src={frameSource(source.variant, report)}
               title={`${source.caption} rendering of the audited page`}
-              sandbox="allow-same-origin allow-scripts"
+              // allow-popups lets a link the viewer clicks open the live page in
+              // a new tab instead of navigating this frame to a site that
+              // refuses to be framed. -to-escape-sandbox means that new tab is a
+              // normal browser tab rather than a crippled sandboxed one.
+              // Still withheld: allow-forms, allow-modals, allow-downloads,
+              // allow-top-navigation -- the preview can never submit anything,
+              // interrupt the page, or navigate the dashboard.
+              sandbox="allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox"
             />
           </section>
         ))}

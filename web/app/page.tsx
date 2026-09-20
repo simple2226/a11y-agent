@@ -49,6 +49,18 @@ export default function Dashboard() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  /** Which run the report on screen belongs to.
+   *
+   * `waiting` used to be `runId && !report`, which is false the moment any
+   * report exists. So a second run kept the FIRST run's report on screen,
+   * never showed the progress panel, and looked like the button did nothing --
+   * while in fact it was polling the whole time. */
+  const [reportRunId, setReportRunId] = useState<string | null>(null);
+
+  /** The run whose poll chain is allowed to write state. An in-flight poll for
+   *  an abandoned run must not overwrite the new run's results when it lands. */
+  const activeRun = useRef<string | null>(null);
+
   // Local mode has no run concept -- there is exactly one report on disk.
   useEffect(() => {
     if (IS_REMOTE) return;
@@ -58,16 +70,23 @@ export default function Dashboard() {
   }, []);
 
   const poll = useCallback(async (id: string) => {
+    if (activeRun.current !== id) return;
     try {
       const summary = await fetchRun(id);
+      // Re-check after every await: the user may have started another run while
+      // this request was in flight, and this one's results are now stale.
+      if (activeRun.current !== id) return;
       setRun(summary);
 
       const finished = summary.pages.filter((page) => page.status === "done");
       if (finished.length) {
         const target =
           finished.find((page) => page.pageId === selectedPageId) ?? finished[0];
+        const fetched = await fetchReport(id, target.pageId);
+        if (activeRun.current !== id) return;
         setSelectedPageId(target.pageId);
-        setReport(await fetchReport(id, target.pageId));
+        setReport(fetched);
+        setReportRunId(id);
       }
 
       // A failed run never becomes a finished one. Polling it for ever is what
@@ -79,12 +98,14 @@ export default function Dashboard() {
         pollTimer.current = setTimeout(() => poll(id), POLL_INTERVAL_MS);
       }
     } catch (error) {
+      if (activeRun.current !== id) return;
       setLoadError((error as Error).message);
     }
   }, [selectedPageId]);
 
   useEffect(() => {
     if (!runId) return;
+    activeRun.current = runId;
     poll(runId);
     return () => {
       if (pollTimer.current) clearTimeout(pollTimer.current);
@@ -103,14 +124,35 @@ export default function Dashboard() {
   }, [rows, selectedRuleId]);
 
   const selectedRow = rows.find((row) => row.ruleId === selectedRuleId) ?? null;
-  const waiting = Boolean(runId) && !report;
+  // True until THIS run has produced a report -- not merely until some report
+  // exists. That distinction is the whole second-run bug.
+  const waiting = Boolean(runId) && reportRunId !== runId;
+
+  /** Drop everything belonging to the previous run. */
+  const clearRun = useCallback(() => {
+    if (pollTimer.current) clearTimeout(pollTimer.current);
+    pollTimer.current = null;
+    activeRun.current = null;
+    setRun(null);
+    setReport(null);
+    setReportRunId(null);
+    setSelectedPageId(null);
+    setSelectedRuleId(null);
+    setLoadError(null);
+  }, []);
+
+  const startRun = useCallback(
+    (id: string) => {
+      clearRun();
+      setRunId(id);
+    },
+    [clearRun, setRunId],
+  );
 
   const resetRun = useCallback(() => {
-    if (pollTimer.current) clearTimeout(pollTimer.current);
-    setRun(null);
-    setLoadError(null);
+    clearRun();
     setRunId(null);
-  }, [setRunId]);
+  }, [clearRun, setRunId]);
 
   if (!report && !loadError && !IS_REMOTE) {
     return (
@@ -146,7 +188,7 @@ export default function Dashboard() {
           )}
         </div>
 
-        <RunStarter onStarted={setRunId} busy={waiting} />
+        <RunStarter onStarted={startRun} busy={waiting} />
       </header>
 
       {report && !waiting ? <VerdictBar report={report} rows={rows} /> : null}

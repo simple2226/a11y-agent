@@ -110,6 +110,34 @@ const HIGHLIGHT_BRIDGE = `
     showNotice.timer = setTimeout(function () { notice.style.display = "none"; }, 2600);
   }
 
+  // Point every outbound link at a new tab rather than at this frame.
+  //
+  // Letting a link navigate the frame is what produced "refused to connect":
+  // <base href> resolves it to the live site, which sends X-Frame-Options, and
+  // the comparison is replaced by a browser error page. Blocking the click
+  // outright is safe but a dead end. Opening the real page in a new tab is the
+  // honest version of what the click means -- the preview is a saved copy of
+  // one page, and the thing being linked to only exists on the live site.
+  function retarget(anchor) {
+    var href = anchor.getAttribute("href") || "";
+    if (!href || href.charAt(0) === "#") return;
+    var resolved = anchor.href || "";
+    if (!/^https?:/i.test(resolved)) return;
+    anchor.target = "_blank";
+    anchor.rel = "noopener noreferrer";
+  }
+
+  function retargetAll() {
+    var links = document.querySelectorAll("a[href]");
+    for (var i = 0; i < links.length; i++) retarget(links[i]);
+  }
+  retargetAll();
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", retargetAll);
+  }
+
+  var toldThem = false;
+
   // Capture phase, so a site's own handlers cannot get there first.
   document.addEventListener("click", function (event) {
     var anchor = event.target && event.target.closest ? event.target.closest("a[href]") : null;
@@ -145,9 +173,26 @@ const HIGHLIGHT_BRIDGE = `
       return;
     }
 
-    event.preventDefault();
-    event.stopPropagation();
-    showNotice("This is a saved copy of one page, so links are disabled. Open the live site in a new tab to follow them.");
+    // Retarget here too, not just on load: this also covers links a script
+    // added after the initial pass. The default action is resolved after the
+    // event is dispatched, so setting target now is enough -- no preventDefault,
+    // the click proceeds and lands in a new tab.
+    retarget(anchor);
+
+    if (anchor.target !== "_blank") {
+      // Not an http(s) link -- javascript:, mailto: on a weird scheme, and so
+      // on. Nothing sensible to open, so swallow it rather than let it navigate
+      // the frame.
+      event.preventDefault();
+      event.stopPropagation();
+      showNotice("That link does not go anywhere in this preview.");
+      return;
+    }
+
+    if (!toldThem) {
+      toldThem = true;
+      showNotice("Opening the live page in a new tab. This preview is a saved copy of one page.");
+    }
   }, true);
 
   document.addEventListener("submit", function (event) {
