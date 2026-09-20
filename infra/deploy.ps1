@@ -79,9 +79,11 @@ $sourceMarkers = @(
     @{ Path = "..\agent\model_provider.py"; Marker = "resolve_provider_chain" },
     @{ Path = "..\agent\graph.py";          Marker = "RUN_BUDGET_SECONDS" },
     @{ Path = "..\agent\graph.py";          Marker = "node_baseline" },
+    @{ Path = "..\agent\graph.py";          Marker = "unverified" },
     @{ Path = "..\agent\deterministic.py";  Marker = "deterministic_edits" },
     @{ Path = "..\agent\handler.py";        Marker = "_record_failure" },
-    @{ Path = "..\audit\runner.py";         Marker = "_check_data" }
+    @{ Path = "..\audit\runner.py";         Marker = "_check_data" },
+    @{ Path = "..\audit\runner.py";         Marker = "chromium_launch_args\(attempt" }
 )
 foreach ($check in $sourceMarkers) {
     if (-not (Test-Path $check.Path)) {

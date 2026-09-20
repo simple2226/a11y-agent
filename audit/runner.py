@@ -75,13 +75,31 @@ def scaled(timeout_ms: int) -> int:
     return timeout_ms
 
 
-def chromium_launch_args() -> list[str]:
-    """Force either mode with A11Y_CHROMIUM_MODE=lambda|desktop."""
+def chromium_launch_args(attempt: int = 0) -> list[str]:
+    """Flags for one audit attempt. Force a mode with A11Y_CHROMIUM_MODE.
+
+    `attempt` escalates. --single-process is the fastest way to start Chromium
+    in Lambda and the least robust way to run it: a renderer crash has nowhere
+    to go, so it takes the browser process with it and every subsequent call
+    raises TargetClosedError. Retrying with the SAME flags reproduces the crash
+    exactly, which is what "audit failed after 2 attempts" was -- one real
+    failure reported twice.
+
+    So attempt 0 is fast, and every attempt after it drops --single-process and
+    --no-zygote. A multi-process Chromium costs a few hundred milliseconds more
+    to start and survives a renderer crash, which is the trade we want once the
+    cheap path has already failed.
+    """
     mode = os.environ.get("A11Y_CHROMIUM_MODE", "").strip().lower()
+
     if mode == "desktop":
         return list(BASE_CHROMIUM_ARGS)
+
     if mode == "lambda" or running_in_lambda():
-        return BASE_CHROMIUM_ARGS + LAMBDA_ONLY_CHROMIUM_ARGS
+        if attempt == 0:
+            return BASE_CHROMIUM_ARGS + LAMBDA_ONLY_CHROMIUM_ARGS
+        return list(BASE_CHROMIUM_ARGS)
+
     return list(BASE_CHROMIUM_ARGS)
 
 
@@ -98,8 +116,11 @@ LAMBDA_TIMEOUT_MULTIPLIER = 2
 NAVIGATION_TIMEOUT_MS = 30_000
 
 # One audit failing should not discard a run that is already minutes deep, so
-# the whole audit is retried once with a fresh browser.
-AUDIT_ATTEMPTS = 2
+# the whole audit is retried with a fresh browser AND different launch flags.
+# Three attempts, not two: the first is the cheap single-process path, the
+# second and third are the robust multi-process one, which gives a genuinely
+# transient crash a second chance on the configuration most likely to survive.
+AUDIT_ATTEMPTS = 3
 
 # Real pages pull 100+ subresources from the origin. Waiting for "load" means
 # waiting for the slowest one, and a single hanging asset stalls forever. We
@@ -336,21 +357,30 @@ def audit_html(
         for attempt in range(AUDIT_ATTEMPTS):
             try:
                 return _audit_file(
-                    temp_file, take_screenshot, max_nodes_per_violation, block_scripts
+                    temp_file, take_screenshot, max_nodes_per_violation, block_scripts,
+                    attempt=attempt,
                 )
             except PlaywrightError as error:
                 # A warm Lambda container can be carrying a previous
                 # invocation's Chromium. Retrying with a brand new browser
                 # clears that, and is far cheaper than losing the whole run and
                 # having Step Functions redo the mirror and every audit.
+                #
+                # The retry uses DIFFERENT launch flags (see
+                # chromium_launch_args) -- a fresh browser with the same flags
+                # crashes the same way on the same page.
                 last_error = error
                 if attempt + 1 < AUDIT_ATTEMPTS:
                     print(
                         f"audit attempt {attempt + 1}/{AUDIT_ATTEMPTS} failed "
-                        f"({type(error).__name__}); retrying with a fresh browser",
+                        f"({type(error).__name__}); retrying with a fresh browser "
+                        f"and more conservative flags",
                         flush=True,
                     )
-        raise RuntimeError(f"audit failed after {AUDIT_ATTEMPTS} attempts") from last_error
+        raise RuntimeError(
+            f"audit failed after {AUDIT_ATTEMPTS} attempts "
+            f"({type(last_error).__name__}: {last_error})"
+        ) from last_error
     finally:
         temp_file.unlink(missing_ok=True)
         Path(temp_directory).rmdir()
@@ -361,13 +391,14 @@ def _audit_file(
     take_screenshot: bool,
     max_nodes_per_violation: int,
     block_scripts: bool,
+    attempt: int = 0,
 ) -> AuditResult:
     """One audit attempt against an on-disk page, with its own browser."""
     notes: list[str] = []
     blocked_counter: dict = {}
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(args=chromium_launch_args())
+        browser = playwright.chromium.launch(args=chromium_launch_args(attempt))
         context = browser.new_context(viewport=VIEWPORT, ignore_https_errors=True)
         if block_scripts:
             _block_heavy_resources(context, blocked_counter)

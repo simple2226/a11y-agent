@@ -228,7 +228,17 @@ def seconds_left(state: RunState) -> int:
 
 
 def node_audit_original(state: RunState) -> StateUpdate:
-    result = audit_html(state["original_html"], take_screenshot=False)
+    # The one audit that IS fatal. Every other node can fall back to a previous
+    # measurement; this one has nothing to fall back to, and without violations
+    # there is no work to do. It is raised deliberately rather than by accident.
+    try:
+        result = audit_html(state["original_html"], take_screenshot=False)
+    except Exception as error:
+        raise RuntimeError(
+            f"the page could not be audited at all: {error}. "
+            f"The mirror succeeded, so this is Chromium, not the site."
+        ) from error
+
     score = score_from_violations(result.violations)
     return {
         "original_violations": result.violations,
@@ -265,7 +275,19 @@ def node_baseline(state: RunState) -> StateUpdate:
             ]
         }
 
-    result = audit_html(applied.html, take_screenshot=False)
+    # Same reasoning as node_verify: an audit that will not run must not end
+    # the run. Skipping the baseline costs its edits; raising costs everything.
+    try:
+        result = audit_html(applied.html, take_screenshot=False)
+    except Exception as error:
+        logger.warning("baseline audit failed: %s", error)
+        return {
+            "log": [
+                f"baseline: skipped -- the verifying audit failed "
+                f"({type(error).__name__}); continuing with the original page"
+            ]
+        }
+
     delta = compare(state["original_violations"], result.violations)
 
     if delta.introduced_rules or delta.score_after < delta.score_before:
@@ -332,8 +354,17 @@ def _remaining_for_rule(html_text: str, rule_id: str) -> tuple[int, list[dict]]:
     was already done and was blind to the nodes that still failed. On a page
     where a rule fails on forty nodes and twelve are sampled, that made repair
     passes worthless and the score never moved.
+
+    A failed audit here is not fatal either: it only means the repair prompt
+    cannot be re-pointed at the still-failing nodes. Returning the cluster's
+    original sample is a worse prompt, not a dead run.
     """
-    result = audit_html(html_text, take_screenshot=False)
+    try:
+        result = audit_html(html_text, take_screenshot=False)
+    except Exception as error:
+        logger.warning("re-audit for %s failed: %s", rule_id, error)
+        return -1, []
+
     for violation in result.violations:
         if violation["id"] == rule_id:
             nodes = violation.get("nodes", [])
@@ -373,8 +404,14 @@ def node_generate_and_apply(state: RunState) -> StateUpdate:
         remaining, remaining_nodes = _remaining_for_rule(
             state["working_html"], cluster.rule_id
         )
-        # Re-point the cluster at what is STILL broken before prompting.
-        cluster = _cluster_for_repair(cluster, remaining_nodes, remaining)
+        # -1 means the re-audit could not run. Keep the cluster's original
+        # sample rather than re-pointing it at an empty node list, which would
+        # prompt the model with nothing to fix.
+        if remaining >= 0:
+            # Re-point the cluster at what is STILL broken before prompting.
+            cluster = _cluster_for_repair(cluster, remaining_nodes, remaining)
+        else:
+            remaining = cluster.total_nodes
         prompt = build_repair_prompt(
             cluster=cluster,
             rejection_feedback=state["last_rejection_feedback"],
@@ -504,7 +541,30 @@ def _is_better(score: int, remaining: int, best_score: int, best_remaining: int)
 
 def node_verify(state: RunState) -> StateUpdate:
     cluster = state["clusters"][state["cluster_index"]]
-    result = audit_html(state["working_html"], take_screenshot=False)
+
+    # An audit that will not run is a broken measurement, not a broken page.
+    # Letting it propagate cost a whole run on iiita.ac.in: Chromium's renderer
+    # died mid-verify, and a page that had already been improved by the
+    # deterministic pass came back as a hard failure with nothing to show.
+    #
+    # Treat it as "this attempt cannot be scored". route_after_verify sends
+    # "unverified" to give_up, which restores the best state that DID verify --
+    # so the run keeps every gain made before the crash and moves to the next
+    # rule.
+    try:
+        result = audit_html(state["working_html"], take_screenshot=False)
+    except Exception as error:
+        logger.warning("verify audit failed for %s: %s", cluster.rule_id, error)
+        return {
+            "last_rule_status": "unverified",
+            "last_newly_introduced": [],
+            "prev_remaining_nodes": state["last_remaining_nodes"],
+            "last_remaining_nodes": UNCOUNTED,
+            "log": [
+                f"verify {cluster.rule_id}: audit failed ({type(error).__name__}); "
+                f"keeping the last state that verified and moving on"
+            ],
+        }
 
     delta = compare(state["original_violations"], result.violations)
     rule_status, remaining_nodes = classify_rule_status(
@@ -557,6 +617,15 @@ def _restore_best(state: RunState) -> StateUpdate:
 
 
 def _current_is_best(state: RunState) -> bool:
+    # An unverified pass is never the best state, whatever its numbers look
+    # like. Those numbers are the PREVIOUS verify's -- the failed audit did not
+    # produce any -- so leaving the edits in place would ship a page carrying
+    # changes nothing ever measured, under a score that predates them. Every
+    # number this project reports has to be a measurement of the page it is
+    # attached to; forcing the rollback is what keeps that true.
+    if state["last_rule_status"] == "unverified":
+        return False
+
     return (
         state["score_after"] == state["cluster_best_score"]
         and state["last_remaining_nodes"] == state["cluster_best_remaining"]
@@ -566,6 +635,11 @@ def _current_is_best(state: RunState) -> bool:
 
 def route_after_verify(state: RunState) -> str:
     rule_status = state["last_rule_status"]
+
+    # The audit itself failed, so nothing about this attempt is measurable.
+    # Another identical pass would only be verified by the same broken audit.
+    if rule_status == "unverified":
+        return "give_up"
 
     # A cluster "regressed" if it introduced a new rule OR lowered the score.
     # The second case matters: making an existing rule fail on more nodes does
@@ -772,7 +846,28 @@ def route_after_next_cluster(state: RunState) -> str:
 
 
 def node_finalise(state: RunState) -> StateUpdate:
-    result = audit_html(state["working_html"], take_screenshot=False)
+    """Score the finished page.
+
+    This is the most expensive place in the graph for an audit to fail: every
+    edit the run made is already in working_html, and raising here throws all
+    of it away at the last step. So a failure falls back to the last violations
+    a verify DID produce, which is a slightly stale reading of the same page
+    rather than no result at all. The run is marked so the number is not
+    presented as a fresh measurement.
+    """
+    try:
+        result = audit_html(state["working_html"], take_screenshot=False)
+    except Exception as error:
+        logger.warning("final audit failed: %s", error)
+        return {
+            "final_violations": state["final_violations"],
+            "score_after": state["score_after"],
+            "log": [
+                f"finalise: the final audit failed ({type(error).__name__}); "
+                f"reporting the last verified score of {state['score_after']}"
+            ],
+        }
+
     delta = compare(state["original_violations"], result.violations)
     return {
         "final_violations": result.violations,

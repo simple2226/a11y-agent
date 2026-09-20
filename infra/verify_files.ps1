@@ -16,7 +16,9 @@ $checks = @(
     @{ File = "audit\mirror.py";            Marker = "PAGE_FETCH_ATTEMPTS" },
     @{ File = "storage\dynamo_store.py";    Marker = "update_page_fields" },
     @{ File = "api\main.py";                Marker = "pagesFailed" },
-    @{ File = "scripts\diagnose_run.py";    Marker = "show_deployment" }
+    @{ File = "scripts\diagnose_run.py";    Marker = "show_deployment" },
+    @{ File = "agent\graph.py";             Marker = "unverified" },
+    @{ File = "audit\runner.py";            Marker = "chromium_launch_args\(attempt" }
 )
 
 foreach ($check in $checks) {
