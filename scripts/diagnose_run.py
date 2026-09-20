@@ -131,7 +131,7 @@ def show_execution(state_machine_arn: str, region: str, run_id: str) -> str:
     return status
 
 
-def show_logs(function_name: str, region: str, minutes: int, lines: int) -> None:
+def show_logs(function_name: str, region: str, minutes: int, lines: int) -> str:
     """The tail of the agent's log, unfiltered.
 
     Deliberately no filterPattern. A Python traceback arrives as several events
@@ -157,16 +157,18 @@ def show_logs(function_name: str, region: str, minutes: int, lines: int) -> None
                 break
     except client.exceptions.ResourceNotFoundException:
         print(f"  no log group {group} yet -- the Lambda has never run")
-        return
+        return ""
 
     if not collected:
         print(f"  no log events in the last {minutes} minutes (try --minutes 120)")
-        return
+        return ""
 
     if len(collected) > lines:
         print(f"  ... {len(collected) - lines} earlier line(s) omitted, --lines to see more")
     for line in collected[-lines:]:
         print(f"  {line}")
+
+    return "\n".join(collected[-400:])
 
 
 def find_agent_function(stack_name: str, region: str) -> str | None:
@@ -238,17 +240,34 @@ def main() -> None:
         print(f"  could not find a {args.stack}-AgentFunction-* Lambda")
 
     print("\n== agent logs ==")
+    log_tail = ""
     if agent_function:
-        show_logs(agent_function, args.region, args.minutes, args.lines)
+        log_tail = show_logs(agent_function, args.region, args.minutes, args.lines)
 
     print("\n== verdict ==")
-    print("  " + verdict(execution_status, page_statuses))
+    print("  " + verdict(execution_status, page_statuses, log_tail))
     print()
 
 
-def verdict(execution_status: str, page_statuses: list[str]) -> str:
+def verdict(execution_status: str, page_statuses: list[str], log_tail: str = "") -> str:
     """Name the failure mode, rather than leaving two readings side by side."""
     unfinished = [status for status in page_statuses if status == "running"]
+
+    # An import error means the Lambda died before any of our code ran, so
+    # nothing else in this report is evidence about the page or the model.
+    if "Runtime.ImportModuleError" in log_tail:
+        missing = ""
+        for line in log_tail.splitlines():
+            if "ImportModuleError" in line:
+                missing = line.split("ImportModuleError:")[-1].strip()[:160]
+                break
+        return (
+            "the Lambda could not even import the agent, so nothing about the\n"
+            "  page or the model is being tested here. The deployed .py files are\n"
+            "  from different versions of each other:\n"
+            f"    {missing}\n"
+            "  Replace the file named above and redeploy."
+        )
 
     # No page row at all is its own failure, and a distinctive one: the agent
     # died before it could write anything, which means it never got past the

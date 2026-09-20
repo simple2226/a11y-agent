@@ -71,8 +71,25 @@ if ($ProviderChain.Count -gt 1 -and
 if (-not (Select-String -Path .\template.yaml -Pattern "RUN_BUDGET_SECONDS" -Quiet)) {
     Fail "template.yaml has no RUN_BUDGET_SECONDS -- it is the OLD version. Replace infra/template.yaml."
 }
-if (-not (Select-String -Path ..\agent\model_provider.py -Pattern "resolve_provider_chain" -Quiet)) {
-    Fail "agent/model_provider.py has no resolve_provider_chain -- it is the OLD version. Replace it."
+# Every Python file the agent imports at cold start, with a marker that only
+# exists in its current version. A mismatch here used to surface as
+# "Runtime.ImportModuleError: cannot import name X from agent.graph" AFTER a
+# full build and deploy -- the Lambda dying before a line of our code ran.
+$sourceMarkers = @(
+    @{ Path = "..\agent\model_provider.py"; Marker = "resolve_provider_chain" },
+    @{ Path = "..\agent\graph.py";          Marker = "RUN_BUDGET_SECONDS" },
+    @{ Path = "..\agent\graph.py";          Marker = "node_baseline" },
+    @{ Path = "..\agent\deterministic.py";  Marker = "deterministic_edits" },
+    @{ Path = "..\agent\handler.py";        Marker = "_record_failure" },
+    @{ Path = "..\audit\runner.py";         Marker = "_check_data" }
+)
+foreach ($check in $sourceMarkers) {
+    if (-not (Test-Path $check.Path)) {
+        Fail "$($check.Path) is missing. The agent will not import without it."
+    }
+    if (-not (Select-String -Path $check.Path -Pattern $check.Marker -Quiet)) {
+        Fail "$($check.Path) has no '$($check.Marker)' -- it is an OLD version. Replace it, then re-run."
+    }
 }
 Write-Host "Source files are the current versions.`n"
 

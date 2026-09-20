@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import threading
 import time
 import traceback
 
-from agent.graph import RUN_BUDGET_SECONDS, build_graph, initial_state
+from agent.graph import build_graph, initial_state
 from audit.mirror import mirror
 from audit.scorer import compare
 from storage import dynamo_store, s3_store
@@ -25,6 +26,16 @@ logger = logging.getLogger(__name__)
 # DynamoDB writes. The fixing loop stops this far before the Lambda would be
 # killed, so a run that goes long still produces a report.
 SHUTDOWN_RESERVE_SECONDS = 180
+
+# Read from the environment rather than imported from agent.graph.
+#
+# It used to be `from agent.graph import RUN_BUDGET_SECONDS`, and that one line
+# turned any version skew between these two files into a cold-start crash:
+#   Runtime.ImportModuleError: cannot import name 'RUN_BUDGET_SECONDS'
+# The Lambda then failed before a single line of ours ran, so nothing recorded a
+# reason. Both modules read the same variable independently now, and neither can
+# break the other's import.
+RUN_BUDGET_SECONDS = float(os.environ.get("RUN_BUDGET_SECONDS", "600"))
 
 # How often the heartbeat writes, while a single graph node is in flight. Nodes
 # take tens of seconds (a Chromium audit) to minutes (a model call), and without
