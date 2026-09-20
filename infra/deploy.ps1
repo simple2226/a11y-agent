@@ -83,7 +83,9 @@ $sourceMarkers = @(
     @{ Path = "..\agent\deterministic.py";  Marker = "deterministic_edits" },
     @{ Path = "..\agent\handler.py";        Marker = "_record_failure" },
     @{ Path = "..\audit\runner.py";         Marker = "_check_data" },
-    @{ Path = "..\audit\runner.py";         Marker = "chromium_launch_args\(attempt" }
+    @{ Path = "..\audit\runner.py";         Marker = "chromium_launch_args\(attempt" },
+    @{ Path = "..\audit\runner.py";         Marker = "sweep_scratch_space" },
+    @{ Path = "..\infra\template.yaml";     Marker = "EphemeralStorage" }
 )
 foreach ($check in $sourceMarkers) {
     if (-not (Test-Path $check.Path)) {

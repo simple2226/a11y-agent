@@ -118,6 +118,19 @@ Resources:
       DockerTag: agent
     Properties:
       PackageType: Image
+      # Lambda's default /tmp is 512 MB, and /tmp SURVIVES between invocations
+      # on a warm container. Chromium treats it as scratch and Playwright
+      # writes an artifacts directory per launch, so a container that has
+      # already served a couple of runs hits ENOSPC -- which presents either as
+      # a write failure or as a renderer that dies on startup, because
+      # Chromium could not get scratch space of its own.
+      #
+      # audit/runner.py sweeps the leftovers before every audit; this is the
+      # other half. Ephemeral storage above 512 MB is billed per GB-second and
+      # is a rounding error next to the 3008 MB of memory this function already
+      # holds for the same duration.
+      EphemeralStorage:
+        Size: 4096
       ImageConfig:
         Command: ["agent.handler.lambda_handler"]
       Policies:

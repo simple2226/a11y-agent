@@ -12,6 +12,7 @@ before we can score. That keeps the inner agent loop fast and offline.
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,6 +67,71 @@ LAMBDA_ONLY_CHROMIUM_ARGS = [
 
 def running_in_lambda() -> bool:
     return bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+
+
+# Scratch directories that belong to us or to Playwright, and are safe to
+# delete when no audit is in flight. Playwright creates one artifacts dir per
+# browser launch and removes it on a CLEAN close -- a crashed browser leaves it
+# behind, which is the exact case we retry into.
+SCRATCH_PREFIXES = ("playwright-artifacts-", "a11y-audit-", ".org.chromium.")
+
+
+def scratch_root() -> Path:
+    return Path(tempfile.gettempdir())
+
+
+def scratch_free_mb() -> int:
+    """Free space in the scratch filesystem, in MB."""
+    try:
+        usage = shutil.disk_usage(scratch_root())
+    except OSError:
+        return -1
+    return usage.free // (1024 * 1024)
+
+
+def sweep_scratch_space() -> int:
+    """Delete leftover browser scratch directories. Returns MB reclaimed.
+
+    Lambda's /tmp is 512 MB by default and it SURVIVES between invocations on a
+    warm container. Chromium uses it heavily and Playwright writes an artifacts
+    directory per launch, so a container that has served a few runs -- and
+    especially one where a browser crashed -- arrives at the next audit with a
+    full disk.
+
+    That is not a slow disk, it is a hard failure, and it presents in two
+    different disguises: ENOSPC when we write the page, and a renderer that
+    dies on startup (TargetClosedError) when Chromium cannot get its own
+    scratch. Both were read as Chromium being unstable. It was the disk.
+
+    Cheap enough to run before every audit; there is nothing to reclaim in the
+    common case and the walk is one directory deep.
+    """
+    reclaimed_bytes = 0
+    root = scratch_root()
+
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return 0
+
+    for entry in entries:
+        if not entry.name.startswith(SCRATCH_PREFIXES):
+            continue
+        try:
+            if entry.is_dir():
+                for inner in entry.rglob("*"):
+                    if inner.is_file():
+                        reclaimed_bytes += inner.stat().st_size
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                reclaimed_bytes += entry.stat().st_size
+                entry.unlink(missing_ok=True)
+        except OSError:
+            # Something else is using it, or it vanished underneath us. Both
+            # are fine -- this is opportunistic cleanup, not a guarantee.
+            continue
+
+    return reclaimed_bytes // (1024 * 1024)
 
 
 def scaled(timeout_ms: int) -> int:
@@ -348,6 +414,8 @@ def audit_html(
     frame it has populated by hand, and on a real page with synchronous external
     scripts that event never arrives.
     """
+    sweep_scratch_space()
+
     temp_directory = tempfile.mkdtemp(prefix="a11y-audit-")
     temp_file = Path(temp_directory) / "page.html"
     temp_file.write_text(html_text, encoding="utf-8")
@@ -371,10 +439,15 @@ def audit_html(
                 # crashes the same way on the same page.
                 last_error = error
                 if attempt + 1 < AUDIT_ATTEMPTS:
+                    # A crashed browser is exactly the case that leaks its
+                    # artifacts directory, so sweep before trying again --
+                    # otherwise three attempts leave three times the litter.
+                    freed = sweep_scratch_space()
                     print(
                         f"audit attempt {attempt + 1}/{AUDIT_ATTEMPTS} failed "
                         f"({type(error).__name__}); retrying with a fresh browser "
-                        f"and more conservative flags",
+                        f"and more conservative flags "
+                        f"[{scratch_free_mb()} MB free after reclaiming {freed} MB]",
                         flush=True,
                     )
         raise RuntimeError(
@@ -382,8 +455,11 @@ def audit_html(
             f"({type(last_error).__name__}: {last_error})"
         ) from last_error
     finally:
-        temp_file.unlink(missing_ok=True)
-        Path(temp_directory).rmdir()
+        # rmtree, not unlink+rmdir: rmdir raises on a directory that is not
+        # empty, and that exception replaces whatever the audit was actually
+        # raising -- so a leaked file both hid the real error AND leaked the
+        # directory it was complaining about.
+        shutil.rmtree(temp_directory, ignore_errors=True)
 
 
 def _audit_file(

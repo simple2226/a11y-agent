@@ -205,6 +205,17 @@ def show_deployment(function_name: str, region: str) -> None:
     print(f"  last modified: {config.get('LastModified')}")
     print(f"  provider chain: {variables.get('MODEL_PROVIDER', '(unset)')}")
 
+    # /tmp is where Chromium and Playwright do all their scratch work, and it
+    # persists across invocations on a warm container. At the 512 MB default a
+    # few runs fill it, and the failure arrives disguised as a browser crash.
+    storage = cast(dict[str, Any], config.get("EphemeralStorage") or {})
+    ephemeral_mb = int(storage.get("Size", 512))
+    if ephemeral_mb <= 512:
+        print(f"  /tmp size: {ephemeral_mb} MB -- DEFAULT. Chromium will run out on a")
+        print("             warm container. The current template sets 4096.")
+    else:
+        print(f"  /tmp size: {ephemeral_mb} MB")
+
     if "RUN_BUDGET_SECONDS" in variables:
         print(f"  budgets: run={variables['RUN_BUDGET_SECONDS']}s "
               f"call={variables.get('MODEL_CALL_BUDGET_SECONDS')}s "
@@ -267,6 +278,21 @@ def verdict(execution_status: str, page_statuses: list[str], log_tail: str = "")
             "  from different versions of each other:\n"
             f"    {missing}\n"
             "  Replace the file named above and redeploy."
+        )
+
+    # Disk before anything else. A full /tmp presents as at least three
+    # different-looking failures -- an OSError on write, a Playwright launch
+    # error, and a renderer that dies with TargetClosedError -- and all three
+    # were read as Chromium being flaky. Name it once, here.
+    if "ENOSPC" in log_tail or "No space left on device" in log_tail:
+        return (
+            "/tmp filled up. Chromium and Playwright use it as scratch and it\n"
+            "  SURVIVES between invocations on a warm container, so this gets worse\n"
+            "  the more runs a container serves. It presents as a browser crash,\n"
+            "  which is what makes it confusing.\n"
+            "  Check '/tmp size' above: 512 MB is the Lambda default and is not\n"
+            "  enough. The current template sets EphemeralStorage to 4096 MB and\n"
+            "  audit/runner.py sweeps leftovers before each audit."
         )
 
     # No page row at all is its own failure, and a distinctive one: the agent

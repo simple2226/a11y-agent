@@ -18,7 +18,8 @@ $checks = @(
     @{ File = "api\main.py";                Marker = "pagesFailed" },
     @{ File = "scripts\diagnose_run.py";    Marker = "show_deployment" },
     @{ File = "agent\graph.py";             Marker = "unverified" },
-    @{ File = "audit\runner.py";            Marker = "chromium_launch_args\(attempt" }
+    @{ File = "audit\runner.py";            Marker = "sweep_scratch_space" },
+    @{ File = "infra\template.yaml";        Marker = "EphemeralStorage" }
 )
 
 foreach ($check in $checks) {
